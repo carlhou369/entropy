@@ -1,20 +1,20 @@
 use std::{collections::HashMap, sync::Arc, vec};
 
 use {
-    rand::random,
-    serde::{Deserialize, Serialize},
-    tokio::sync::Mutex,
-    wirehair::{WirehairDecoder, WirehairEncoder},
-};
-use {
     actix::prelude::*,
     actix_multipart::form::{bytes::Bytes, MultipartForm, MultipartFormConfig},
     actix_web::{
         get,
+        middleware::Logger,
         web::{Data, Json, JsonConfig, Query},
         App, HttpResponse, HttpServer, Responder,
-        middleware::Logger,
     },
+};
+use {
+    rand::random,
+    serde::{Deserialize, Serialize},
+    tokio::sync::Mutex,
+    wirehair::{WirehairDecoder, WirehairEncoder},
 };
 
 #[derive(Message, Clone, Debug)]
@@ -221,7 +221,9 @@ async fn put(data: Data<PeerState>, MultipartForm(form): MultipartForm<PutForm>)
         let mut set = tokio::task::JoinSet::new();
         for (fragment_id, fragment) in fragments.clone() {
             let (host, port) = peers.next().unwrap().clone();
-            chunk_info.fragments.push((fragment_id, (host.clone(), port)));
+            chunk_info
+                .fragments
+                .push((fragment_id, (host.clone(), port)));
             set.spawn(async move {
                 //let dispatch_fragment_start = std::time::Instant::now();
                 let url = format!("http://{host}:{port}/put_chunk");
