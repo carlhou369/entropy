@@ -20,6 +20,8 @@ mod app;
 mod common;
 mod peer;
 mod plaza;
+mod vrf;
+mod keystore;
 
 #[derive(clap::Parser)]
 struct Cli {
