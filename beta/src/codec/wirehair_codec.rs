@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, vec};
 
-use {rand::random, wirehair::WirehairEncoder};
+use {
+    rand::random,
+    wirehair::{WirehairDecoder, WirehairEncoder},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct WirehairCodecOptions {
@@ -21,7 +24,7 @@ impl Default for WirehairCodecOptions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WirehairCodec {
     option: WirehairCodecOptions,
 }
@@ -65,6 +68,55 @@ impl WirehairCodec {
     fn encode_into_fragments(&self, data: Vec<u8>) -> HashMap<u32, Vec<u8>> {
         self.encode_internal(data, self.option.fragment_k, self.option.fragment_n)
     }
+
+    pub fn decode(&self, links: HashMap<u32, HashMap<u32, Vec<u8>>>, msg_size: usize) -> Vec<u8> {
+        let mut chunks = HashMap::new();
+        for (chunk_id, fragments) in links {
+            let msg_size = msg_size / self.option.chunk_k;
+            let chunk =
+                self.decode_into_fragments(fragments, msg_size, msg_size / self.option.fragment_k);
+            chunks.insert(chunk_id, chunk);
+        }
+
+        self.decode_into_chunks(chunks, msg_size, msg_size / self.option.chunk_k)
+    }
+
+    fn decode_into_chunks(
+        &self,
+        fragments: HashMap<u32, Vec<u8>>,
+        msg_size: usize,
+        block_size: usize,
+    ) -> Vec<u8> {
+        self.decode_internal(fragments, msg_size, block_size)
+    }
+
+    fn decode_into_fragments(
+        &self,
+        chunks: HashMap<u32, Vec<u8>>,
+        msg_size: usize,
+        block_size: usize,
+    ) -> Vec<u8> {
+        self.decode_internal(chunks, msg_size, block_size)
+    }
+
+    fn decode_internal(
+        &self,
+        chunks: HashMap<u32, Vec<u8>>,
+        msg_size: usize,
+        block_size: usize,
+    ) -> Vec<u8> {
+        let mut chunk_decoder = WirehairDecoder::new(msg_size as u64, block_size as u32);
+        for (chunk_id, chunk) in chunks {
+            // Todo: check parameters for wirehair.
+            if chunk_decoder.decode(chunk_id, &chunk).unwrap() {
+                break;
+            }
+        }
+        let mut chunk = vec![0; msg_size];
+        // Todo: return err if necessiary.
+        chunk_decoder.recover(&mut chunk).unwrap();
+        chunk
+    }
 }
 
 #[cfg(test)]
@@ -73,12 +125,17 @@ mod tests {
 
     use crate::codec::wirehair_codec::{WirehairCodec, WirehairCodecOptions};
 
-    const TEST_LARGE_FILE_SIZE: usize = 1 << 30;
+    const TEST_LARGE_FILE_SIZE: usize = 1 << 20;
+
     #[test]
     fn encode_large_file() {
         let mut data = vec![0; TEST_LARGE_FILE_SIZE];
         rand::thread_rng().fill_bytes(&mut data);
-        let links = WirehairCodec::new(WirehairCodecOptions::default()).encode(data);
-        let _ = links;
+
+        let codec = WirehairCodec::new(WirehairCodecOptions::default());
+        let links = codec.encode(data.clone());
+        let recovered = codec.decode(links, data.len());
+
+        assert_eq!(data, recovered);
     }
 }
