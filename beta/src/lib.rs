@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod eld;
 pub mod server;
 
 #[cfg(test)]

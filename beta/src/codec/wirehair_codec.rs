@@ -1,4 +1,6 @@
-use std::{collections::HashMap, vec};
+use std::collections::HashMap;
+
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use {
     rand::random,
@@ -26,12 +28,18 @@ impl Default for WirehairCodecOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct WirehairCodec {
-    option: WirehairCodecOptions,
+    options: WirehairCodecOptions,
 }
 
 impl WirehairCodec {
-    pub fn new(option: WirehairCodecOptions) -> WirehairCodec {
-        WirehairCodec { option }
+    pub fn new() -> WirehairCodec {
+        WirehairCodec {
+            options: WirehairCodecOptions::default(),
+        }
+    }
+
+    pub fn new_with_options(options: WirehairCodecOptions) -> WirehairCodec {
+        WirehairCodec { options }
     }
 
     pub fn encode(&self, data: Vec<u8>) -> HashMap<u32, HashMap<u32, Vec<u8>>> {
@@ -42,6 +50,17 @@ impl WirehairCodec {
         }
 
         links
+    }
+
+    // Todo: check if it's necessary to refactor.
+    pub fn encode_parallelly(&self, data: Vec<u8>) -> HashMap<u32, HashMap<u32, Vec<u8>>> {
+        self.encode_into_chunks(data)
+            .into_par_iter()
+            .map(|(chunk_id, chunk)| {
+                let fragments = self.encode_into_fragments(chunk);
+                (chunk_id, fragments)
+            })
+            .collect()
     }
 
     fn encode_internal(&self, data: Vec<u8>, k: usize, n: usize) -> HashMap<u32, Vec<u8>> {
@@ -62,23 +81,23 @@ impl WirehairCodec {
     }
 
     fn encode_into_chunks(&self, data: Vec<u8>) -> HashMap<u32, Vec<u8>> {
-        self.encode_internal(data, self.option.chunk_k, self.option.chunk_n)
+        self.encode_internal(data, self.options.chunk_k, self.options.chunk_n)
     }
 
     fn encode_into_fragments(&self, data: Vec<u8>) -> HashMap<u32, Vec<u8>> {
-        self.encode_internal(data, self.option.fragment_k, self.option.fragment_n)
+        self.encode_internal(data, self.options.fragment_k, self.options.fragment_n)
     }
 
     pub fn decode(&self, links: HashMap<u32, HashMap<u32, Vec<u8>>>, msg_size: usize) -> Vec<u8> {
         let mut chunks = HashMap::new();
         for (chunk_id, fragments) in links {
-            let msg_size = msg_size / self.option.chunk_k;
+            let msg_size = msg_size / self.options.chunk_k;
             let chunk =
-                self.decode_into_fragments(fragments, msg_size, msg_size / self.option.fragment_k);
+                self.decode_into_fragments(fragments, msg_size, msg_size / self.options.fragment_k);
             chunks.insert(chunk_id, chunk);
         }
 
-        self.decode_into_chunks(chunks, msg_size, msg_size / self.option.chunk_k)
+        self.decode_into_chunks(chunks, msg_size, msg_size / self.options.chunk_k)
     }
 
     fn decode_into_chunks(
@@ -123,7 +142,7 @@ impl WirehairCodec {
 mod tests {
     use rand::RngCore;
 
-    use crate::codec::wirehair_codec::{WirehairCodec, WirehairCodecOptions};
+    use crate::codec::wirehair_codec::WirehairCodec;
 
     const TEST_LARGE_FILE_SIZE: usize = 1 << 20;
 
@@ -132,7 +151,7 @@ mod tests {
         let mut data = vec![0; TEST_LARGE_FILE_SIZE];
         rand::thread_rng().fill_bytes(&mut data);
 
-        let codec = WirehairCodec::new(WirehairCodecOptions::default());
+        let codec = WirehairCodec::new();
         let links = codec.encode(data.clone());
         let recovered = codec.decode(links, data.len());
 

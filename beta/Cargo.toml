@@ -10,6 +10,7 @@ name = "demo"
 path = "src/bin/demo.rs"
 
 [dependencies]
+wirehair = { version = "0.1.0", path = "../wirehair" }
 actix = "0.13.2"
 actix-web = "4.4.1"
 actix-multipart = "0.6.1"
@@ -22,4 +23,8 @@ futures = "0.3.30"
 bytes = "0.5.6"
 reqwest = { version = "0.11.24", features = ["json"] }
 rand = "0.8.5"
-wirehair = { version = "0.1.0", path = "../wirehair" }
+rayon = "1.9.0"
+cid = "0.11.1"
+
+[dev-dependencies]
+criterion = "0.3"
