@@ -1,0 +1,14 @@
+syntax = "proto3";
+package reqres_proto;
+
+message PeerRequestMessage {
+    string id = 1;
+    string command = 2;
+    bytes data = 3;
+}
+
+message PeerResponseMessage {
+    string id = 1;
+    string command = 2;
+    bytes data = 3;
+}

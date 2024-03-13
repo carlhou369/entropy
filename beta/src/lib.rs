@@ -1,5 +1,12 @@
 pub mod codec;
 pub mod server;
+pub mod p2p;
+pub mod keystore;
+mod vrf;
+
+pub mod reqres_proto {
+    include!(concat!(env!("OUT_DIR"), "/reqres_proto.rs"));
+}
 
 #[cfg(test)]
 pub mod test {
