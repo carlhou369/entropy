@@ -698,7 +698,6 @@ dependencies = [
  "actix",
  "actix-multipart",
  "actix-web",
- "anyhow",
  "bytes 0.5.6",
  "cid",
  "clap 4.5.2",
@@ -719,6 +718,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "thiserror",
  "tokio",
  "wirehair",
 ]

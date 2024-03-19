@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use crate::p2p::error::P2PNetworkError;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -13,11 +13,11 @@ use crate::{p2p::behaviour::PeerRequest, reqres_proto::PeerRequestMessage};
 
 use super::behaviour::Action;
 
-pub async fn bootstrap_light(
+pub async fn bootstrap_peer(
     mut action_sender: mpsc::Sender<Action>,
     full_node: Multiaddr,
     address_local: Multiaddr,
-) -> Result<()> {
+) -> Result<(), P2PNetworkError> {
     if let Some(Protocol::P2p(peer_id)) = full_node.iter().last() {
         let (sender, receiver) = oneshot::channel();
         // dial
@@ -51,6 +51,6 @@ pub async fn bootstrap_light(
         receiver.await.unwrap().unwrap();
         Ok(())
     } else {
-        Err(anyhow!("full node address format error {}", full_node))
+        Err(P2PNetworkError::MultiAddrFormatError(full_node))
     }
 }

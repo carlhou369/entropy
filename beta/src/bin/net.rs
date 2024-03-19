@@ -1,7 +1,6 @@
-use anyhow::Result;
-use beta::keystore::{KeyStore};
+use beta::keystore::KeyStore;
 use beta::p2p::behaviour::{Action, Event, Network, PeerRequest, PeerResponse};
-use beta::p2p::utils::bootstrap_light;
+use beta::p2p::utils::bootstrap_peer;
 use beta::reqres_proto::{PeerRequestMessage, PeerResponseMessage};
 use beta::server;
 use clap::Parser;
@@ -14,13 +13,13 @@ use futures::{
 };
 use libp2p::PeerId;
 use libp2p::{multiaddr::Protocol, Multiaddr};
-use log::{info};
+use log::info;
 use rand::random;
 
-
-use std::{path::PathBuf};
+use std::error::Error;
+use std::path::PathBuf;
+use tokio::task::spawn;
 use tokio::time::{self, Duration};
-use tokio::{task::spawn};
 
 #[derive(clap::Parser)]
 #[command(version, about, long_about = None)]
@@ -46,7 +45,7 @@ struct Cli {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 20)]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let log_level = cli.log_level.unwrap_or("info".into());
     let env = Env::default().default_filter_or(&log_level);
@@ -70,7 +69,7 @@ async fn main() -> Result<()> {
     // Init keystore
     let path = cli.key.unwrap_or(PathBuf::from("./keystore"));
     let keystore = KeyStore::generate_from_file(path.clone()).unwrap_or(KeyStore::generate());
-    keystore.save_to(path)?;
+    keystore.save_to(path).unwrap();
 
     // Demo p2p
     let (mut action_sender, action_receiver) = mpsc::channel(0);
@@ -84,7 +83,7 @@ async fn main() -> Result<()> {
     let port = cli.port.unwrap_or_else(|| 6000 + random::<u16>() % 100);
     info!("start p2p at {port}");
 
-    let mut address_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", port).parse()?;
+    let mut address_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", port).parse().unwrap();
     let local_peer_id = network.local_peer_id();
     address_local = address_local.with_p2p(local_peer_id).unwrap();
 
@@ -129,10 +128,10 @@ async fn main() -> Result<()> {
 
     // Start light node demo
     if let Some(full_node_addr_str) = cli.full {
-        let full_node: Multiaddr = full_node_addr_str.parse()?;
+        let full_node: Multiaddr = full_node_addr_str.parse().unwrap();
         if let Some(Protocol::P2p(peer_id)) = full_node.iter().last() {
             // Bootstrap light node
-            bootstrap_light(action_sender.clone(), full_node.clone(), address_local)
+            bootstrap_peer(action_sender.clone(), full_node.clone(), address_local)
                 .await
                 .unwrap();
 

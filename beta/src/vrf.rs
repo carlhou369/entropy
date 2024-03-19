@@ -1,17 +1,27 @@
 #![allow(dead_code)]
-use anyhow::{anyhow, Ok, Result};
+use std::io;
+
 use rand::{rngs::OsRng, RngCore};
 use schnorrkel::{
     context::SigningContext,
     points::RistrettoBoth,
     signing_context,
     vrf::{VRFInOut, VRFProof},
-    ExpansionMode, MiniSecretKey, PublicKey,
+    ExpansionMode, MiniSecretKey, PublicKey, SignatureError,
 };
+use thiserror::Error;
 
 pub type VrfHash = [u8; 32];
 
 pub type VrfProof = [u8; 64];
+
+#[derive(Error, Debug)]
+pub enum VrfError {
+    #[error("sigature error")]
+    SignatureError(SignatureError),
+    #[error("io error")]
+    IOError(#[from] io::Error),
+}
 
 #[derive(Clone, Debug)]
 pub struct VrfPair(schnorrkel::Keypair);
@@ -30,14 +40,15 @@ impl VrfPair {
         Self::generate_with_seed(&seed).unwrap()
     }
 
-    pub fn generate_with_seed(seed: &[u8; 32]) -> Result<Self> {
-        let mini_secret = MiniSecretKey::from_bytes(seed).map_err(|e| anyhow!("{}", e))?;
+    pub fn generate_with_seed(seed: &[u8; 32]) -> Result<Self, VrfError> {
+        let mini_secret =
+            MiniSecretKey::from_bytes(seed).map_err(VrfError::SignatureError)?;
         Ok(VrfPair(
             mini_secret.expand_to_keypair(ExpansionMode::Ed25519),
         ))
     }
 
-    pub fn vrf_sign(&self, input: &[u8]) -> Result<(VrfHash, VrfProof)> {
+    pub fn vrf_sign(&self, input: &[u8]) -> Result<(VrfHash, VrfProof), VrfError> {
         let (in_out, proof, _) = self
             .0
             .secret
@@ -47,7 +58,12 @@ impl VrfPair {
         Ok((in_out.output.to_bytes(), proof.to_bytes()))
     }
 
-    pub fn vrf_verify(&self, input: &[u8], vrf_hash: VrfHash, proof: VrfProof) -> Result<()> {
+    pub fn vrf_verify(
+        &self,
+        input: &[u8],
+        vrf_hash: VrfHash,
+        proof: VrfProof,
+    ) -> Result<(), VrfError> {
         self.get_public().verify_vrf(input, vrf_hash, proof)
     }
 
@@ -57,24 +73,28 @@ impl VrfPair {
 }
 
 impl VrfPublickey {
-    pub fn verify_vrf(&self, input: &[u8], vrf_hash: VrfHash, proof: VrfProof) -> Result<()> {
+    pub fn verify_vrf(
+        &self,
+        input: &[u8],
+        vrf_hash: VrfHash,
+        proof: VrfProof,
+    ) -> Result<(), VrfError> {
         let output = RistrettoBoth::from_bytes(vrf_hash.as_slice())
-            .map_err(|e| anyhow!("ristretto point from bytes error {}", e))?;
-        let proof =
-            VRFProof::from_bytes(&proof).map_err(|e| anyhow!("parse vrf proof error {}", e))?;
+            .map_err(VrfError::SignatureError)?;
+        let proof = VRFProof::from_bytes(&proof).map_err(VrfError::SignatureError)?;
         let in_out = VRFInOut {
             input: self.0.vrf_hash(context().bytes(input)),
             output,
         };
         self.0
             .vrf_verify(context().bytes(input), &in_out.to_preout(), &proof)
-            .map_err(|e| anyhow!("{}", e))?;
+            .map_err(VrfError::SignatureError)?;
         Ok(())
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VrfError> {
         Ok(VrfPublickey(
-            PublicKey::from_bytes(bytes).map_err(|e| anyhow!("{}", e))?,
+            PublicKey::from_bytes(bytes).map_err(VrfError::SignatureError)?,
         ))
     }
 

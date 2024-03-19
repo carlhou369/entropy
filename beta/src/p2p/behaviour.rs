@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use crate::p2p::error::P2PNetworkError;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
@@ -15,7 +15,6 @@ use libp2p::{
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId,
 };
-
 
 use crate::reqres_proto::{PeerRequestMessage, PeerResponseMessage};
 use libp2p::StreamProtocol;
@@ -47,16 +46,16 @@ pub enum Action {
     Dial {
         peer_id: PeerId,
         peer_addr: Multiaddr,
-        sender: oneshot::Sender<Result<()>>,
+        sender: oneshot::Sender<Result<(), P2PNetworkError>>,
     },
     SendRequest {
         peer_id: PeerId,
         msg: PeerRequest,
-        sender: oneshot::Sender<Result<PeerResponse>>,
+        sender: oneshot::Sender<Result<PeerResponse, P2PNetworkError>>,
     },
     GetPeers {
         key: Vec<u8>,
-        sender: oneshot::Sender<Result<Vec<PeerId>>>,
+        sender: oneshot::Sender<Result<Vec<PeerId>, P2PNetworkError>>,
     },
     SendResponse {
         response: PeerResponse,
@@ -85,9 +84,10 @@ pub struct Network {
     swarm: Swarm<Behaviour>,
     action_receiver: mpsc::Receiver<Action>,
     event_sender: mpsc::Sender<Event>,
-    pending_request: HashMap<OutboundRequestId, oneshot::Sender<Result<PeerResponse>>>,
-    pending_get_peers: HashMap<QueryId, oneshot::Sender<Result<Vec<PeerId>>>>,
-    pending_dial: HashMap<PeerId, oneshot::Sender<Result<()>>>,
+    pending_request:
+        HashMap<OutboundRequestId, oneshot::Sender<Result<PeerResponse, P2PNetworkError>>>,
+    pending_get_peers: HashMap<QueryId, oneshot::Sender<Result<Vec<PeerId>, P2PNetworkError>>>,
+    pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), P2PNetworkError>>>,
 }
 
 impl Network {
@@ -95,7 +95,7 @@ impl Network {
         secret_key_seed: Option<[u8; 32]>,
         action_receiver: mpsc::Receiver<Action>,
         event_sender: mpsc::Sender<Event>,
-    ) -> Result<Self> {
+    ) -> Result<Self, P2PNetworkError> {
         let id_keys = match secret_key_seed {
             Some(seed) => identity::Keypair::ed25519_from_bytes(seed).unwrap(),
             None => identity::Keypair::generate_ed25519(),
@@ -139,7 +139,8 @@ impl Network {
                     )),
                     ping: ping::Behaviour::new(ping::Config::new()),
                 })
-            })?
+            })
+            .map_err(|e| P2PNetworkError::NewBehaviourError(format!("{e}")))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
 
@@ -214,10 +215,9 @@ impl Network {
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     let _ = sender.send(Ok(peers.clone()));
                     debug!("get peers progress {peers:?}");
-                    if let Some(mut q) = self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .query_mut(&id) { q.finish(); }
+                    if let Some(mut q) = self.swarm.behaviour_mut().kademlia.query_mut(&id) {
+                        q.finish();
+                    }
                 }
             }
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
@@ -231,11 +231,10 @@ impl Network {
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     debug!("get closest peers error {e}");
                     if step.last {
-                        let _ = sender.send(Err(anyhow!("{e}")));
-                        if let Some(mut q) = self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .query_mut(&id) { q.finish(); }
+                        let _ = sender.send(Err(P2PNetworkError::KadQueryError(e)));
+                        if let Some(mut q) = self.swarm.behaviour_mut().kademlia.query_mut(&id) {
+                            q.finish();
+                        }
                     }
                 }
             }
@@ -293,7 +292,7 @@ impl Network {
                     .pending_request
                     .remove(&request_id)
                     .expect("Request to still be pending.")
-                    .send(Err(anyhow!("{}", error)));
+                    .send(Err(P2PNetworkError::SendRequestFailure(error)));
             }
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
@@ -324,8 +323,7 @@ impl Network {
                         debug!("connection dialer address {address}");
                     }
                     ConnectedPoint::Listener { send_back_addr, .. } => {
-                        self
-                            .event_sender
+                        self.event_sender
                             .send(Event::IncomeConnection {
                                 peer_id,
                                 connection_id,
@@ -344,8 +342,7 @@ impl Network {
                 endpoint: _,
                 cause,
             } => {
-                self
-                    .event_sender
+                self.event_sender
                     .send(Event::ConnectionClosed {
                         peer_id,
                         connection_id,
@@ -357,7 +354,7 @@ impl Network {
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 if let Some(peer_id) = peer_id {
                     if let Some(sender) = self.pending_dial.remove(&peer_id) {
-                        let _ = sender.send(Err(anyhow!("{}", error)));
+                        let _ = sender.send(Err(P2PNetworkError::DialError(error)));
                     }
                 }
             }
@@ -394,7 +391,7 @@ impl Network {
                             e.insert(sender);
                         }
                         Err(e) => {
-                            let _ = sender.send(Err(anyhow!(e)));
+                            let _ = sender.send(Err(P2PNetworkError::DialError(e)));
                         }
                     }
                 } else {

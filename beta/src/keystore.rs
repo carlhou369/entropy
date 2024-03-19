@@ -1,16 +1,27 @@
 #![allow(dead_code)]
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::PathBuf,
 };
-
-use anyhow::{anyhow, Ok, Result};
+use thiserror::Error;
 use ed25519_dalek::ed25519::signature::SignerMut;
 use merlin::Transcript;
 use rand::{rngs::OsRng, RngCore};
 use std::fs::{File, OpenOptions};
 
-use crate::vrf::{VrfHash, VrfPair, VrfProof, VrfPublickey};
+use crate::vrf::{VrfError, VrfHash, VrfPair, VrfProof, VrfPublickey};
+
+#[derive(Error, Debug)]
+pub enum KeyStoreError {
+    #[error("io error")]
+    IOError(#[from] io::Error),
+    #[error("vrf error")]
+    VrfError(#[from] VrfError),
+    #[error("keypair not exist error")]
+    KeyNotExist,
+    #[error("ed25519 sign error")]
+    Ed25519SignError(String),
+}
 
 pub struct KeyStore {
     pub seed: [u8; 32],
@@ -21,7 +32,7 @@ pub struct KeyStore {
 
 impl KeyStore {
     // todo: save encrypted seed
-    pub fn save_to(&self, path: PathBuf) -> Result<()> {
+    pub fn save_to(&self, path: PathBuf) -> Result<(), KeyStoreError> {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -30,7 +41,7 @@ impl KeyStore {
         Ok(file.write_all(&self.seed)?)
     }
 
-    pub fn generate_from_file(path: PathBuf) -> Result<Self> {
+    pub fn generate_from_file(path: PathBuf) -> Result<Self, KeyStoreError> {
         let mut file = File::open(path)?;
         let mut seed = [0u8; 32];
         file.read_exact(&mut seed)?;
@@ -45,7 +56,7 @@ impl KeyStore {
         Self::generate_with_seed(&seed).unwrap()
     }
 
-    pub fn generate_with_seed(seed: &[u8; 32]) -> Result<Self> {
+    pub fn generate_with_seed(seed: &[u8; 32]) -> Result<Self, KeyStoreError> {
         let mut ctx = Transcript::new(b"generate");
         ctx.append_message(b"raw", seed);
         let mut ed25519_seed = [0u8; 32];
@@ -64,11 +75,11 @@ impl KeyStore {
         })
     }
 
-    pub fn vrf_sign(&self, input: &[u8]) -> Result<(VrfHash, VrfProof)> {
+    pub fn vrf_sign(&self, input: &[u8]) -> Result<(VrfHash, VrfProof), KeyStoreError> {
         self.vrf_pair
             .clone()
-            .ok_or(anyhow!("vrf keypair not exist"))
-            .and_then(|pair| pair.vrf_sign(input))
+            .ok_or(KeyStoreError::KeyNotExist)
+            .and_then(|pair| pair.vrf_sign(input).map_err(KeyStoreError::VrfError))
     }
 
     pub fn vrf_public(&self) -> Option<VrfPublickey> {
@@ -79,17 +90,20 @@ impl KeyStore {
         Some(self.ed25519_secret.clone()?.verifying_key())
     }
 
-    pub fn ed25519_sign(&self, msg: &[u8]) -> Result<ed25519_dalek::Signature> {
+    pub fn ed25519_sign(&self, msg: &[u8]) -> Result<ed25519_dalek::Signature, KeyStoreError> {
         self.ed25519_secret
             .clone()
-            .ok_or(anyhow!("ed25519 keypair not exist"))
-            .and_then(|key| key.clone().try_sign(msg).map_err(|e| anyhow!("{}", e)))
+            .ok_or(KeyStoreError::KeyNotExist)
+            .and_then(|key| {
+                key.clone()
+                    .try_sign(msg)
+                    .map_err(|e| KeyStoreError::Ed25519SignError(format!("{e}")))
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    
 
     use crate::keystore::*;
     #[test]
