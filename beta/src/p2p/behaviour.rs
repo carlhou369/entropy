@@ -4,11 +4,13 @@ use futures::prelude::*;
 use futures::StreamExt;
 
 use libp2p::core::ConnectedPoint;
+#[cfg(feature = "gossipsub")]
+use libp2p::gossipsub;
 use libp2p::kad::{Caching, Config, QueryId};
 use libp2p::swarm::ConnectionId;
 use libp2p::{
     core::Multiaddr,
-    gossipsub, identify, identity, kad,
+    identify, identity, kad,
     multiaddr::Protocol,
     noise, ping,
     request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
@@ -37,6 +39,7 @@ pub struct PeerResponse(pub PeerResponseMessage);
 pub struct Behaviour {
     request_response: request_response::cbor::Behaviour<PeerRequest, PeerResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
+    #[cfg(feature = "gossipsub")]
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
@@ -110,6 +113,7 @@ impl Network {
                 yamux::Config::default,
             )?
             .with_behaviour(|key| {
+                #[cfg(feature = "gossipsub")]
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .max_transmit_size(262144)
                     .build()
@@ -128,6 +132,7 @@ impl Network {
                         [(StreamProtocol::new("/reqres"), ProtocolSupport::Full)],
                         request_response::Config::default(),
                     ),
+                    #[cfg(feature = "gossipsub")]
                     gossipsub: gossipsub::Behaviour::new(
                         gossipsub::MessageAuthenticity::Signed(key.clone()),
                         gossipsub_config,
@@ -149,6 +154,7 @@ impl Network {
             .kademlia
             .set_mode(Some(kad::Mode::Server));
 
+        #[cfg(feature = "gossipsub")]
         swarm
             .behaviour_mut()
             .gossipsub
@@ -425,6 +431,7 @@ impl Network {
         self.swarm.local_peer_id().to_owned()
     }
 
+    #[cfg(feature = "gossipsub")]
     fn gossip_topic() -> gossipsub::IdentTopic {
         gossipsub::IdentTopic::new("entropy_gossip")
     }
