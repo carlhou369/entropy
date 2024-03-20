@@ -13,6 +13,7 @@ use crate::{p2p::behaviour::PeerRequest, reqres_proto::PeerRequestMessage};
 
 use super::behaviour::Action;
 
+// Bootstrap_peer dials an existing peer in the p2p network and get discoverable by other peers. 
 pub async fn bootstrap_peer(
     mut action_sender: mpsc::Sender<Action>,
     full_node: Multiaddr,
@@ -20,7 +21,7 @@ pub async fn bootstrap_peer(
 ) -> Result<(), P2PNetworkError> {
     if let Some(Protocol::P2p(peer_id)) = full_node.iter().last() {
         let (sender, receiver) = oneshot::channel();
-        // dial
+        // Dial peer
         let action = Action::Dial {
             peer_id,
             peer_addr: full_node,
@@ -30,11 +31,11 @@ pub async fn bootstrap_peer(
         receiver.await.unwrap().unwrap();
         debug!("dial {peer_id} done");
 
-        // bootstrap
+        // Bootstrap
         action_sender.send(Action::Bootstrap {}).await.unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // acknowledge multiaddress
+        // Acknowledge multiaddress
         let (sender, receiver) = oneshot::channel();
         action_sender
             .send(Action::SendRequest {

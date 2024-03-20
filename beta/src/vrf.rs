@@ -41,8 +41,7 @@ impl VrfPair {
     }
 
     pub fn generate_with_seed(seed: &[u8; 32]) -> Result<Self, VrfError> {
-        let mini_secret =
-            MiniSecretKey::from_bytes(seed).map_err(VrfError::SignatureError)?;
+        let mini_secret = MiniSecretKey::from_bytes(seed).map_err(VrfError::SignatureError)?;
         Ok(VrfPair(
             mini_secret.expand_to_keypair(ExpansionMode::Ed25519),
         ))
@@ -79,8 +78,8 @@ impl VrfPublickey {
         vrf_hash: VrfHash,
         proof: VrfProof,
     ) -> Result<(), VrfError> {
-        let output = RistrettoBoth::from_bytes(vrf_hash.as_slice())
-            .map_err(VrfError::SignatureError)?;
+        let output =
+            RistrettoBoth::from_bytes(vrf_hash.as_slice()).map_err(VrfError::SignatureError)?;
         let proof = VRFProof::from_bytes(&proof).map_err(VrfError::SignatureError)?;
         let in_out = VRFInOut {
             input: self.0.vrf_hash(context().bytes(input)),
@@ -106,6 +105,7 @@ impl VrfPublickey {
 #[cfg(test)]
 mod tests {
     use crate::vrf::VrfPair;
+
     #[test]
     fn vrf_sign_verify() {
         let secret = VrfPair::new();

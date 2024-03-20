@@ -28,7 +28,6 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 
-// Simple file exchange protocol
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRequest(pub PeerRequestMessage);
 
@@ -45,21 +44,27 @@ pub struct Behaviour {
     ping: ping::Behaviour,
 }
 
+// Action contains commands Network handles from external.
 pub enum Action {
+    // Command to dial another peer.
+    // peer_id is an unique idendity of a peer, peer_addr is a multiaddr including ip, port, transport protocol info.
     Dial {
         peer_id: PeerId,
         peer_addr: Multiaddr,
         sender: oneshot::Sender<Result<(), P2PNetworkError>>,
     },
+    // Command to send request to a peer
     SendRequest {
         peer_id: PeerId,
         msg: PeerRequest,
         sender: oneshot::Sender<Result<PeerResponse, P2PNetworkError>>,
     },
+    // Command to get peers closest to key in the DHT network. Can be used for peer discovery.
     GetPeers {
         key: Vec<u8>,
         sender: oneshot::Sender<Result<Vec<PeerId>, P2PNetworkError>>,
     },
+    // Command to send response, corresbonding to a request.
     SendResponse {
         response: PeerResponse,
         channel: ResponseChannel<PeerResponse>,
@@ -67,19 +72,24 @@ pub enum Action {
     Bootstrap {},
 }
 
+// Event contains events send from Network to external.
 pub enum Event {
+    // Event when received a request.
     InboundRequest {
         request: PeerRequest,
         channel: ResponseChannel<PeerResponse>,
     },
+    // Event when being dialed and successfully connected to another peer.
     IncomeConnection {
         peer_id: PeerId,
         connection_id: ConnectionId,
     },
+    // Event when connection closed.
     ConnectionClosed {
         peer_id: PeerId,
         connection_id: ConnectionId,
     },
+    // Event when bootstrap done.
     Bootstrap,
 }
 
@@ -94,6 +104,8 @@ pub struct Network {
 }
 
 impl Network {
+    // New P2P network. action_receiver is for receiving external action commands, i.e. dial another peer, send resquest.
+    // event_sender is for sending network events to external, i.e. connection established/closed, request received.
     pub async fn new(
         secret_key_seed: Option<[u8; 32]>,
         action_receiver: mpsc::Receiver<Action>,
@@ -171,6 +183,7 @@ impl Network {
         })
     }
 
+    // Start network listening to multiaddr.
     pub async fn start(mut self, multiaddr: Multiaddr) {
         let peer_id = self.swarm.local_peer_id().to_owned();
         self.swarm
