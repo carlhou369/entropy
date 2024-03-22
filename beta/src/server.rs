@@ -1,20 +1,20 @@
 use std::{collections::HashMap, sync::Arc, vec};
 
 use {
-    rand::random,
-    serde::{Deserialize, Serialize},
-    tokio::sync::Mutex,
-    wirehair::{WirehairDecoder, WirehairEncoder},
-};
-use {
     actix::prelude::*,
     actix_multipart::form::{bytes::Bytes, MultipartForm, MultipartFormConfig},
     actix_web::{
         get,
+        middleware::Logger,
         web::{Data, Json, JsonConfig, Query},
         App, HttpResponse, HttpServer, Responder,
-        middleware::Logger,
     },
+};
+use {
+    rand::random,
+    serde::{Deserialize, Serialize},
+    tokio::sync::Mutex,
+    wirehair::{WirehairDecoder, WirehairEncoder},
 };
 
 #[derive(Message, Clone, Debug)]
@@ -92,7 +92,11 @@ impl Handler<Disconnect> for Server {
 
 impl Handler<Put> for Server {
     type Result = ();
-    fn handle(&mut self, msg: Put, _: &mut Self::Context) -> <Server as Handler<Put>>::Result {
+    fn handle(
+        &mut self,
+        msg: Put,
+        _: &mut Self::Context,
+    ) -> <Server as Handler<Put>>::Result {
         let object_size = msg.data.len();
         let chunk_k = 8;
         let chunk_n = 10;
@@ -102,13 +106,16 @@ impl Handler<Put> for Server {
         let data = msg.data.into_bytes();
 
         let mut chunks = HashMap::new();
-        let outer_encoder = WirehairEncoder::new(data, (object_size / chunk_k) as _);
+        let outer_encoder =
+            WirehairEncoder::new(data, (object_size / chunk_k) as _);
         for _ in 0..chunk_n {
             let chunk_id = random();
             let mut chunk = vec![0; object_size / chunk_k];
             outer_encoder.encode(chunk_id, &mut chunk).unwrap();
-            let inner_encoder =
-                WirehairEncoder::new(chunk, (object_size / chunk_k / fragment_k) as _);
+            let inner_encoder = WirehairEncoder::new(
+                chunk,
+                (object_size / chunk_k / fragment_k) as _,
+            );
             let mut fragments = HashMap::new();
             for _ in 0..fragment_n {
                 let fragment_id = random();
@@ -175,7 +182,10 @@ struct PutForm {
 }
 
 #[actix_web::post("/put")]
-async fn put(data: Data<PeerState>, MultipartForm(form): MultipartForm<PutForm>) -> impl Responder {
+async fn put(
+    data: Data<PeerState>,
+    MultipartForm(form): MultipartForm<PutForm>,
+) -> impl Responder {
     let msg = form.files[0].data.as_ref().to_vec();
     let object_size = msg.len();
 
@@ -197,7 +207,10 @@ async fn put(data: Data<PeerState>, MultipartForm(form): MultipartForm<PutForm>)
         let chunk_id = random();
         let mut chunk = vec![0; object_size / chunk_k];
         outer_coder.encode(chunk_id, &mut chunk).unwrap();
-        let inner_encoder = WirehairEncoder::new(chunk, (object_size / chunk_k / fragment_k) as _);
+        let inner_encoder = WirehairEncoder::new(
+            chunk,
+            (object_size / chunk_k / fragment_k) as _,
+        );
         let mut fragments = HashMap::new();
         for _ in 0..fragment_n {
             let fragment_id = random();
@@ -221,7 +234,9 @@ async fn put(data: Data<PeerState>, MultipartForm(form): MultipartForm<PutForm>)
         let mut set = tokio::task::JoinSet::new();
         for (fragment_id, fragment) in fragments.clone() {
             let (host, port) = peers.next().unwrap().clone();
-            chunk_info.fragments.push((fragment_id, (host.clone(), port)));
+            chunk_info
+                .fragments
+                .push((fragment_id, (host.clone(), port)));
             set.spawn(async move {
                 //let dispatch_fragment_start = std::time::Instant::now();
                 let url = format!("http://{host}:{port}/put_chunk");
@@ -254,7 +269,10 @@ struct ChunkId {
 }
 
 #[actix_web::post("/get")]
-async fn get(data: Data<PeerState>, chunk_id: Query<ChunkId>) -> impl Responder {
+async fn get(
+    data: Data<PeerState>,
+    chunk_id: Query<ChunkId>,
+) -> impl Responder {
     //let chunks = data.chunks.lock().await.clone();
     let chunk_k = data.chunk_config.outer_k;
     let fragment_k = data.chunk_config.inner_k;
@@ -271,7 +289,9 @@ async fn get(data: Data<PeerState>, chunk_id: Query<ChunkId>) -> impl Responder 
             let port = *port;
             let fragment_id = *fragment_id;
             set.spawn(async move {
-                let url = format!("http://{host}:{port}/get_chunk?id={fragment_id}&data=");
+                let url = format!(
+                    "http://{host}:{port}/get_chunk?id={fragment_id}&data="
+                );
                 let client = reqwest::Client::new();
                 let res = client.post(url).send().await;
                 match res {
@@ -280,11 +300,11 @@ async fn get(data: Data<PeerState>, chunk_id: Query<ChunkId>) -> impl Responder 
                         let fragment = fragment.unwrap();
                         //println!("{}, {:?} \n\n", fragment_id, fragment.data.clone());
                         Some(fragment)
-                    }
+                    },
                     Err(err) => {
                         println!("{err}");
                         None
-                    }
+                    },
                 }
             });
         }
@@ -292,14 +312,15 @@ async fn get(data: Data<PeerState>, chunk_id: Query<ChunkId>) -> impl Responder 
             match res.unwrap() {
                 Some(fragment) => {
                     chunk.insert(fragment.id, fragment.data);
-                }
-                None => {}
+                },
+                None => {},
             }
         }
         chunks.insert(chunk_info.chunk_id, chunk);
     }
 
-    let mut outer_decoder = WirehairDecoder::new(object_size as _, (object_size / chunk_k) as _);
+    let mut outer_decoder =
+        WirehairDecoder::new(object_size as _, (object_size / chunk_k) as _);
     for (chunk_id, fragments) in chunks {
         let mut inner_decoder = WirehairDecoder::new(
             (object_size / chunk_k) as _,
@@ -341,7 +362,10 @@ struct Fragment {
 }
 
 #[actix_web::post("/put_chunk")]
-async fn put_chunk(data: Data<PeerState>, fragment: Json<Fragment>) -> impl Responder {
+async fn put_chunk(
+    data: Data<PeerState>,
+    fragment: Json<Fragment>,
+) -> impl Responder {
     //println!("{}, {:?} \n\n", fragment.id, fragment.data.clone());
 
     data.fragments
@@ -352,7 +376,10 @@ async fn put_chunk(data: Data<PeerState>, fragment: Json<Fragment>) -> impl Resp
 }
 
 #[actix_web::post("/get_chunk")]
-async fn get_chunk(data: Data<PeerState>, fragment: Query<Fragment>) -> impl Responder {
+async fn get_chunk(
+    data: Data<PeerState>,
+    fragment: Query<Fragment>,
+) -> impl Responder {
     match data.fragments.lock().await.get(&fragment.id) {
         Some(res) => {
             let t = &Fragment {
@@ -360,13 +387,18 @@ async fn get_chunk(data: Data<PeerState>, fragment: Query<Fragment>) -> impl Res
                 data: res.clone(),
             };
             HttpResponse::Ok().json(t)
-        }
+        },
         None => HttpResponse::Ok().body("not found"),
     }
 }
 
 impl Peer {
-    pub async fn start(&mut self, host: String, port: u16, peers: Vec<(String, u16)>) {
+    pub async fn start(
+        &mut self,
+        host: String,
+        port: u16,
+        peers: Vec<(String, u16)>,
+    ) {
         let addr = (host, port);
         let mut peer_state = PeerState::default();
         peer_state.chunk_config = ChunkConfig {
