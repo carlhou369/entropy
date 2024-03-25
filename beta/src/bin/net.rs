@@ -1,23 +1,20 @@
 use beta::keystore::KeyStore;
-use beta::p2p::behaviour::{Action, Event, Network, PeerRequest, PeerResponse};
-use beta::p2p::utils::bootstrap_peer;
-use beta::reqres_proto::{PeerRequestMessage, PeerResponseMessage};
+use beta::p2p::behaviour::Network;
+use beta::p2p::client::Client;
+use beta::p2p::utils::random_req_id;
+use beta::reqres_proto::PeerRequestMessage;
 use beta::server;
 use clap::Parser;
 use env_logger::{Builder, Env};
 use futures::future;
-use futures::StreamExt;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::join_all,
-    SinkExt,
-};
+use futures::{channel::mpsc, future::join_all};
 use libp2p::PeerId;
 use libp2p::{multiaddr::Protocol, Multiaddr};
 use log::info;
-use rand::random;
+use rand::distributions::Uniform;
+use rand::{random, Rng};
+use tokio::sync::Mutex;
 
-use std::collections::HashSet;
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -25,7 +22,6 @@ use tokio::task::spawn;
 use tokio::time::{self, Duration, Instant};
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 const DEFAULT_BENCH_CNT: usize = 100;
 
@@ -50,6 +46,9 @@ struct Cli {
     #[arg(short, long, value_name = "KEY")]
     bench_peers: Option<usize>,
 
+    #[arg(short, long, value_name = "Size")]
+    payload_size: Option<usize>,
+
     /// Turn debugging information on
     #[arg(short, long, value_name = "LOGLEVL")]
     log_level: Option<String>,
@@ -57,7 +56,6 @@ struct Cli {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // console_subscriber::init();
     let cli = Cli::parse();
     let log_level = cli.log_level.unwrap_or("info".into());
     let env = Env::default().default_filter_or(&log_level);
@@ -79,6 +77,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let bench_light_node_cnt: usize = cli.bench_peers.unwrap_or(DEFAULT_BENCH_CNT);
+    let payload_size: usize = cli.payload_size.unwrap_or(1024 * 1024);
 
     // Init keystore
     let path = cli.key.unwrap_or(PathBuf::from("./keystore"));
@@ -86,110 +85,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
     keystore.save_to(path).unwrap();
 
     // Demo p2p
-    let (mut action_sender, action_receiver) = mpsc::channel(0);
-    let (event_sender, mut event_receiver) = mpsc::channel(0);
+    let (action_sender, action_receiver) = mpsc::channel(0);
+    let (event_sender, event_receiver) = mpsc::channel(0);
 
     // New p2p Network
     let network = Network::new(Some(keystore.seed), action_receiver, event_sender)
         .await
         .unwrap();
 
+    let control = network.control();
+
     let port = cli.port.unwrap_or_else(|| 6000 + random::<u16>() % 100);
     info!("start p2p at {port}");
-
     let mut address_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", port).parse().unwrap();
+
     let local_peer_id = network.local_peer_id();
     address_local = address_local.with_p2p(local_peer_id).unwrap();
+
+    // New client
+    let client = Client::new(
+        address_local.clone(),
+        action_sender.clone(),
+        Arc::new(Mutex::new(event_receiver)),
+        control,
+    );
 
     // Start P2P network listener
     spawn(network.start(address_local.clone()));
 
-    let connected_peers = Arc::new(Mutex::new(HashSet::new()));
-    let peers_clone = Arc::clone(&connected_peers);
-
-    // Demo P2P network event handler
-    let mut action_sender_dup = action_sender.clone();
-    spawn(async move {
-        while let Some(e) = event_receiver.next().await {
-            match e {
-                Event::InboundRequest { request, channel } => {
-                    info!("handle inboud request {request:?}");
-                    action_sender_dup
-                        .send(Action::SendResponse {
-                            response: PeerResponse(PeerResponseMessage {
-                                id: request.0.id,
-                                command: request.0.command,
-                                data: b"ack".to_vec(),
-                            }),
-                            channel,
-                        })
-                        .await
-                        .unwrap()
-                }
-                Event::IncomeConnection {
-                    peer_id,
-                    connection_id,
-                } => {
-                    let mut peers = peers_clone.lock().await;
-                    peers.insert(peer_id);
-                    info!("inbound connected to peerID {peer_id}, connectionID {connection_id}");
-                }
-                Event::ConnectionClosed {
-                    peer_id,
-                    connection_id,
-                } => {
-                    let mut peers = peers_clone.lock().await;
-                    peers.remove(&peer_id);
-                    info!("connection closed peerID {peer_id} connectionID {connection_id}");
-                }
-                _ => {}
-            }
-        }
-    });
+    let client_clone = client.clone();
+    spawn(async move { client_clone.handle_event().await });
 
     if let Some(full_node_addr_str) = cli.full {
         // Start light node demo
         let full_node: Multiaddr = full_node_addr_str.parse().unwrap();
         if let Some(Protocol::P2p(peer_id)) = full_node.iter().last() {
             // Bootstrap light node
-            bootstrap_peer(action_sender.clone(), full_node.clone(), address_local)
-                .await
-                .unwrap();
+            client.bootstrap_light(full_node).await.unwrap();
 
             // Light node send demo requests
             let mut inter = time::interval(Duration::from_secs(10));
             loop {
                 inter.tick().await;
-                let (sender, receiver) = oneshot::channel();
 
                 info!("send request greeting");
-                action_sender
-                    .send(Action::SendRequest {
-                        peer_id,
-                        msg: PeerRequest(PeerRequestMessage {
-                            id: format!("{}", random::<u16>()),
-                            command: "greeting".to_string(),
-                            data: b"hello".to_vec(),
-                        }),
-                        sender,
-                    })
-                    .await
-                    .unwrap();
-
-                let res = receiver.await.unwrap();
+                let msg = PeerRequestMessage {
+                    id: random_req_id(),
+                    command: "greeting".to_string(),
+                    data: b"hello".to_vec(),
+                };
+                let res = client.request(peer_id, msg).await.unwrap();
                 info!("get response {:?}", res);
 
-                let (sender, receiver) = oneshot::channel();
                 // Demo discovery query random peers
                 let key = PeerId::random();
-                action_sender
-                    .send(Action::GetPeers {
-                        key: key.into(),
-                        sender,
-                    })
-                    .await
-                    .unwrap();
-                let res = receiver.await.unwrap();
+                let res = client.get_closest_peers(key).await.unwrap();
                 info!("get closest peers {:?}", res);
             }
         } else {
@@ -197,43 +147,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     } else {
         // Start as full node demo
-        let peers_clone = Arc::clone(&connected_peers);
-        let mut action_sender_dup = action_sender.clone();
+        let mut rng = rand::thread_rng();
+        let between = Uniform::from(0..=255);
+        let payload: Vec<u8> = (0..payload_size).map(|_| rng.sample(between)).collect();
+
+        // Bench send data large chunk
         let mut inter = time::interval(Duration::from_secs(1));
         loop {
             inter.tick().await;
-            let peers = peers_clone.lock().await;
-            let mut receivers = vec![];
+            let peers = client.get_connected_peers().await;
             if peers.len() >= bench_light_node_cnt {
+                info!("start sending chunks");
                 let start_time = Instant::now();
-                let msg = PeerRequest(PeerRequestMessage {
-                    id: format!("{}", random::<u16>()),
-                    command: "broadcast".to_string(),
-                    data: b"enough peers".to_vec(),
-                });
+                let mut tasks = Vec::new();
                 for peer_id in peers.iter() {
-                    let (sender, receiver) = oneshot::channel();
-                    receivers.push(receiver);
-                    action_sender_dup
-                        .send(Action::SendRequest {
-                            peer_id: peer_id.to_owned(),
-                            msg: msg.clone(),
-                            sender,
-                        })
-                        .await
-                        .unwrap();
+                    let task = client.send_chunk(peer_id.to_owned(), payload.clone());
+                    tasks.push(task);
                 }
-                join_all(receivers.into_iter().map(|r| async {
-                    match r.await {
-                        Ok(Ok(res)) => {
-                            info!("broadcast ack {:?}", res);
-                        }
-                        _ => panic!("response error"),
-                    }
-                }))
-                .await;
+                join_all(tasks).await;
                 let dur = Instant::now() - start_time;
-                info!("broadcast and wait ack takes {:?} ms", dur.as_millis());
+                info!("send chunks and wait ack takes {:?} ms", dur.as_millis());
                 break;
             }
         }

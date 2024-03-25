@@ -2,6 +2,7 @@ use crate::p2p::error::P2PNetworkError;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
+use tempfile::NamedTempFile;
 
 use libp2p::core::ConnectedPoint;
 #[cfg(feature = "gossipsub")]
@@ -19,14 +20,18 @@ use libp2p::{
 };
 
 use crate::reqres_proto::{PeerRequestMessage, PeerResponseMessage};
-use libp2p::StreamProtocol;
+use libp2p::{Stream, StreamProtocol};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 
+use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+
+#[derive(Eq, Hash, PartialEq, Clone)]
+pub struct ChunkID(pub Vec<u8>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRequest(pub PeerRequestMessage);
@@ -42,6 +47,7 @@ pub struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
+    stream: libp2p_stream::Behaviour,
 }
 
 // Action contains commands Network handles from external.
@@ -89,6 +95,11 @@ pub enum Event {
         peer_id: PeerId,
         connection_id: ConnectionId,
     },
+    // Chunk Received
+    ChunkReceived {
+        peer_id: PeerId,
+        chunk_id: ChunkID,
+    },
     // Event when bootstrap done.
     Bootstrap,
 }
@@ -116,14 +127,13 @@ impl Network {
             None => identity::Keypair::generate_ed25519(),
         };
         let peer_id = id_keys.public().to_peer_id();
+        let _yamux_config = yamux::Config::default();
+        let mut plex_config = libp2p_mplex::MplexConfig::default();
+        plex_config.set_split_send_size(1024 * 1024 * 10);
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default,
-            )?
+            .with_tcp(tcp::Config::default(), noise::Config::new, || plex_config)?
             .with_behaviour(|key| {
                 #[cfg(feature = "gossipsub")]
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -142,7 +152,8 @@ impl Network {
                     ),
                     request_response: request_response::cbor::Behaviour::new(
                         [(StreamProtocol::new("/reqres"), ProtocolSupport::Full)],
-                        request_response::Config::default(),
+                        request_response::Config::default()
+                            .with_request_timeout(Duration::from_secs(100)),
                     ),
                     #[cfg(feature = "gossipsub")]
                     gossipsub: gossipsub::Behaviour::new(
@@ -155,6 +166,7 @@ impl Network {
                         key.public(),
                     )),
                     ping: ping::Behaviour::new(ping::Config::new()),
+                    stream: libp2p_stream::Behaviour::new(),
                 })
             })
             .map_err(|e| P2PNetworkError::NewBehaviourError(format!("{e}")))?
@@ -196,6 +208,8 @@ impl Network {
         self.swarm.add_external_address(multiaddr.clone());
 
         let mut inter = tokio::time::interval(Duration::from_secs(10));
+        let mut control = self.swarm.behaviour().stream.new_control();
+        let mut incomming_stream = control.accept(Self::stream_protocol()).unwrap();
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_event(event).await,
@@ -203,11 +217,53 @@ impl Network {
                     Some(c) => self.handle_action(c).await,
                     None=>  return,
                 },
+                Some((peer,stream)) = incomming_stream.next() => {
+                        self.handle_stream(peer,stream).await.unwrap();
+                },
                 _ = inter.tick() => {
                     self.list_peers();
                 }
             }
         }
+    }
+
+    // Handle chunk data sent from another peer, saved as file with data hash as filename.
+    async fn handle_stream(
+        &mut self,
+        peer_id: PeerId,
+        mut stream: Stream,
+    ) -> Result<(), P2PNetworkError> {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let mut buffer = [0u8; 1024 * 8];
+        let mut hasher = blake3::Hasher::new();
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(bytes_read) => {
+                    info!("read bytes {bytes_read}");
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..bytes_read]);
+                    temp_file.write_all(&buffer[..bytes_read]).unwrap();
+                }
+                Err(e) => {
+                    error!("handle stream {e:?}");
+                    break;
+                }
+            }
+        }
+        let hash = hasher.finalize();
+
+        temp_file.persist(format!("{}", hash))?;
+        stream.write_all(b"hello").await?;
+        self.event_sender
+            .send(Event::ChunkReceived {
+                peer_id,
+                chunk_id: ChunkID(hash.as_bytes().to_vec()),
+            })
+            .await
+            .unwrap();
+        Ok(())
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
@@ -457,5 +513,13 @@ impl Network {
                 }
             }
         }
+    }
+
+    pub fn stream_protocol() -> libp2p::StreamProtocol {
+        libp2p::StreamProtocol::new("/entropy_stream")
+    }
+
+    pub fn control(&self) -> libp2p_stream::Control {
+        self.swarm.behaviour().stream.new_control()
     }
 }

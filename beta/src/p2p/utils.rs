@@ -1,3 +1,5 @@
+use rand::{rngs::OsRng, RngCore};
+
 use std::time::Duration;
 
 use crate::p2p::error::P2PNetworkError;
@@ -13,7 +15,7 @@ use crate::{p2p::behaviour::PeerRequest, reqres_proto::PeerRequestMessage};
 
 use super::behaviour::Action;
 
-// Bootstrap_peer dials an existing peer in the p2p network and get discoverable by other peers. 
+// Bootstrap_peer dials an existing peer in the p2p network and get discoverable by other peers.
 pub async fn bootstrap_peer(
     mut action_sender: mpsc::Sender<Action>,
     full_node: Multiaddr,
@@ -54,4 +56,11 @@ pub async fn bootstrap_peer(
     } else {
         Err(P2PNetworkError::MultiAddrFormatError(full_node))
     }
+}
+
+pub fn random_req_id() -> String {
+    let mut rng = OsRng;
+    let mut buf = [0u8; 32];
+    rng.fill_bytes(&mut buf);
+    hex::encode(buf)
 }

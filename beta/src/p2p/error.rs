@@ -1,6 +1,10 @@
+use std::io;
+
 use libp2p::{
     kad::GetClosestPeersError, request_response::OutboundFailure, swarm::DialError, Multiaddr,
 };
+
+use tempfile::PersistError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -17,4 +21,10 @@ pub enum P2PNetworkError {
     NewBehaviourError(String),
     #[error("multi addr format error")]
     MultiAddrFormatError(Multiaddr),
+    #[error("io error")]
+    IOError(#[from] io::Error),
+    #[error("persis file error")]
+    PersisError(#[from] PersistError),
+    #[error("open stream error")]
+    OpenStreamError(String),
 }
