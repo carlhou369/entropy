@@ -239,7 +239,6 @@ impl Network {
         loop {
             match stream.read(&mut buffer).await {
                 Ok(bytes_read) => {
-                    info!("read bytes {bytes_read}");
                     if bytes_read == 0 {
                         break;
                     }
