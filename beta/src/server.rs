@@ -45,6 +45,12 @@ pub struct Server {
     sessions: HashMap<usize, String>,
 }
 
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Server {
     pub fn new() -> Server {
         Server {
@@ -125,12 +131,13 @@ impl Handler<Put> for Server {
             }
             chunks.insert(chunk_id, fragments);
         }
-        ()
     }
 }
 
 #[derive(Default)]
 pub struct Peer {}
+
+type ChunkInfoMap = Mutex<HashMap<u64, (u64, u64, Vec<ChunkInfo>)>>;
 
 #[derive(Debug, Default)]
 struct PeerState {
@@ -139,7 +146,7 @@ struct PeerState {
     pub chunk_config: ChunkConfig,
 
     pub fragments: Mutex<HashMap<u32, Vec<u8>>>,
-    pub chunk_infos: Mutex<HashMap<u64, (u64, u64, Vec<ChunkInfo>)>>,
+    pub chunk_infos: ChunkInfoMap,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -196,7 +203,7 @@ async fn put(
 
     let mut sum = 0u64;
     for n in msg.iter() {
-        sum = sum + *n as u64;
+        sum += *n as u64;
     }
 
     let encoder_start = std::time::Instant::now();

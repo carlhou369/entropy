@@ -22,7 +22,7 @@ env_logger = "0.11.1"
 futures = "0.3.30"
 getrandom = "^0.2.12"
 hex = "0.4.3"
-libp2p = {version = "0.53.2", features = ["tokio", "cbor", "dns", "kad", "noise", "macros", "request-response", "tcp", "yamux", "gossipsub", "identify", "ping", "quic"]}
+libp2p = {version = "0.53.2", features = ["tokio", "cbor", "dns", "kad", "noise", "macros", "request-response", "tcp", "yamux", "gossipsub", "identify", "ping"]}
 libp2p-mplex = "0.41.0"
 libp2p-stream = "0.1.0-alpha"
 log = "0.4.21"

@@ -1,11 +1,33 @@
+use serde::{Deserialize, Serialize};
+
 pub mod codec;
-pub mod server;
-pub mod p2p;
 pub mod keystore;
+pub mod p2p;
+pub mod peer;
+pub mod server;
 mod vrf;
 
 pub mod reqres_proto {
     include!(concat!(env!("OUT_DIR"), "/reqres_proto.rs"));
+}
+
+/// CID is an unique id (Sha3) of data content.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash, Default,
+)]
+pub struct CID(String);
+
+pub fn cid(content: &[u8]) -> CID {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(content);
+    let hash = hasher.finalize();
+    CID(hash.to_string())
+}
+
+impl From<CID> for Vec<u8> {
+    fn from(val: CID) -> Self {
+        val.0.into_bytes().to_vec()
+    }
 }
 
 #[cfg(test)]

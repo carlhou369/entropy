@@ -8,7 +8,7 @@ use futures::{
     SinkExt,
 };
 use libp2p::{multiaddr::Protocol, Multiaddr};
-use log::debug;
+
 use rand::random;
 
 use crate::{p2p::behaviour::PeerRequest, reqres_proto::PeerRequestMessage};
@@ -31,7 +31,6 @@ pub async fn bootstrap_peer(
         };
         action_sender.send(action).await.unwrap();
         receiver.await.unwrap().unwrap();
-        debug!("dial {peer_id} done");
 
         // Bootstrap
         action_sender.send(Action::Bootstrap {}).await.unwrap();
@@ -58,9 +57,28 @@ pub async fn bootstrap_peer(
     }
 }
 
+/// Generate random bytes and hex it for request id. Response id is the same as it's request.
 pub fn random_req_id() -> String {
     let mut rng = OsRng;
     let mut buf = [0u8; 32];
     rng.fill_bytes(&mut buf);
     hex::encode(buf)
+}
+
+pub struct Defer<F: FnOnce()> {
+    cleanup: Option<F>,
+}
+
+impl<F: FnOnce()> Defer<F> {
+    pub fn new(f: F) -> Defer<F> {
+        Defer { cleanup: Some(f) }
+    }
+}
+
+impl<F: FnOnce()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
 }
