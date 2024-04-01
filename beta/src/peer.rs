@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Write, sync::Arc, vec};
+use std::{collections::HashMap, io::Write};
 
 use libp2p::PeerId;
 use log::error;
@@ -17,15 +17,13 @@ use {
     actix_web::{
         get,
         middleware::Logger,
-        web::{Data, Json, JsonConfig, Query},
+        web::{Data, JsonConfig},
         App, HttpResponse, HttpServer, Responder,
     },
 };
 use {
-    rand::random,
     serde::{Deserialize, Serialize},
     tokio::sync::Mutex,
-    wirehair::{WirehairDecoder, WirehairEncoder},
 };
 
 #[derive(Debug)]

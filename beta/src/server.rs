@@ -45,6 +45,12 @@ pub struct Server {
     sessions: HashMap<usize, String>,
 }
 
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Server {
     pub fn new() -> Server {
         Server {
@@ -125,7 +131,7 @@ impl Handler<Put> for Server {
             }
             chunks.insert(chunk_id, fragments);
         }
-        ()
+        
     }
 }
 
@@ -196,7 +202,7 @@ async fn put(
 
     let mut sum = 0u64;
     for n in msg.iter() {
-        sum = sum + *n as u64;
+        sum += *n as u64;
     }
 
     let encoder_start = std::time::Instant::now();

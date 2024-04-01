@@ -146,10 +146,7 @@ impl Client {
         let mut action_sender = self.action_sender.clone();
         let (sender, receiver) = oneshot::channel();
         action_sender
-            .send(Action::GetPeers {
-                key: key.into(),
-                sender,
-            })
+            .send(Action::GetPeers { key, sender })
             .await
             .unwrap();
         receiver.await.unwrap()
@@ -267,19 +264,16 @@ impl Client {
                             let mut pendind_chunks =
                                 self.pending_chunks.lock().await;
 
-                            let mut chunk_id = CID::default();
-
-                            match serde_json::from_slice::<PushChunkReq>(
-                                &request.0.data,
-                            ) {
-                                Ok(req) => {
-                                    chunk_id = req.chunk_id;
-                                },
-                                Err(e) => {
-                                    error!("parse error {:?}", e);
-                                    continue;
-                                },
-                            }
+                            let chunk_id =
+                                match serde_json::from_slice::<PushChunkReq>(
+                                    &request.0.data,
+                                ) {
+                                    Ok(req) => req.chunk_id,
+                                    Err(e) => {
+                                        error!("parse error {:?}", e);
+                                        continue;
+                                    },
+                                };
                             info!("chunk id {}", chunk_id.0.clone());
                             if let Some(ChunkState::Saved(_chunk_id)) =
                                 pendind_chunks.remove(&chunk_id)
@@ -298,18 +292,16 @@ impl Client {
                                     })
                                     .await
                                     .unwrap();
-                            } else {
-                                if !pendind_chunks.contains_key(&chunk_id) {
-                                    pendind_chunks.insert(
-                                        chunk_id.clone(),
-                                        ChunkState::WaitToReceive((
-                                            chunk_id,
-                                            channel,
-                                            request.0.id,
-                                            None,
-                                        )),
-                                    );
-                                }
+                            } else if !pendind_chunks.contains_key(&chunk_id) {
+                                pendind_chunks.insert(
+                                    chunk_id.clone(),
+                                    ChunkState::WaitToReceive((
+                                        chunk_id,
+                                        channel,
+                                        request.0.id,
+                                        None,
+                                    )),
+                                );
                             }
                         },
                         PeerCommand::GetChunk => {

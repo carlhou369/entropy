@@ -3,7 +3,7 @@ use beta::p2p::behaviour::Network;
 use beta::p2p::client::Client;
 use beta::p2p::utils::random_req_id;
 use beta::reqres_proto::PeerRequestMessage;
-use beta::{cid, server, CID};
+use beta::{cid, server};
 use clap::Parser;
 use env_logger::{Builder, Env};
 use futures::future;

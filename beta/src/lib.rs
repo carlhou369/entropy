@@ -23,9 +23,9 @@ pub fn cid(content: &[u8]) -> CID {
     CID(hash.to_string())
 }
 
-impl Into<Vec<u8>> for CID {
-    fn into(self) -> Vec<u8> {
-        self.0.into_bytes().to_vec()
+impl From<CID> for Vec<u8> {
+    fn from(val: CID) -> Self {
+        val.0.into_bytes().to_vec()
     }
 }
 
