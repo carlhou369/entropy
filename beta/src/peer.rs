@@ -1,5 +1,9 @@
-use std::{collections::HashMap, io::Write};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    io::{Read, Write},
+};
 
+use actix_web::web::Query;
 use libp2p::PeerId;
 use log::error;
 use tokio::task::JoinSet;
@@ -26,7 +30,7 @@ use {
     tokio::sync::Mutex,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ContentMeta {
     pub chunk_meta: HashMap<u32, HashMap<u32, (CID, Vec<PeerId>)>>,
     pub size: usize,
@@ -125,9 +129,106 @@ async fn put(
     HttpResponse::Ok().body(msg_cid.0)
 }
 
-#[derive(Serialize, Deserialize)]
-struct ChunkId {
-    id: u64,
+#[actix_web::post("/get")]
+async fn get(data: Data<PeerState>, chunk_id: Query<String>) -> impl Responder {
+    let cid = CID(chunk_id.0);
+
+    let content_log = data.content_log.lock().await;
+    let content_meta = content_log.get(&cid);
+    if content_meta.is_none() {
+        return HttpResponse::BadRequest()
+            .body(format!("content not exist cid {}", cid.0));
+    }
+    let content_meta = content_meta.unwrap().to_owned();
+
+    let object_size = content_meta.size as usize;
+    let mut links: HashMap<u32, HashMap<u32, Vec<u8>>> = HashMap::new();
+    let mut set = JoinSet::new();
+    for (chunk_id, chunk_meta) in content_meta.chunk_meta.into_iter() {
+        for (fragment_id, (fragment_cid, light_peers)) in chunk_meta.into_iter()
+        {
+            let client = data.p2p_client.clone();
+            set.spawn(async move {
+                for light_peer in light_peers.into_iter() {
+                    match client
+                        .get_chunk(light_peer.clone(), fragment_cid.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            return Ok((
+                                chunk_id.clone(),
+                                fragment_id.clone(),
+                                fragment_cid.clone(),
+                            ));
+                        },
+                        Err(e) => {
+                            error!(
+                                "get chunk {} from peer {} error {}",
+                                fragment_cid.0.clone(),
+                                light_peer.clone(),
+                                e
+                            );
+                            continue;
+                        },
+                    };
+                }
+                return Err((
+                    chunk_id.clone(),
+                    fragment_id.clone(),
+                    fragment_cid.clone(),
+                ));
+            });
+        }
+    }
+
+    while let Some(res) = set.join_next().await {
+        let s = res.unwrap();
+        match s {
+            Ok((chunk_id, fragment_id, fragment_cid)) => {
+                let resp_error =
+                    HttpResponse::InternalServerError().body(format!(
+                        "content {} chunk {} fragment {} not found",
+                        cid.0, chunk_id, fragment_id
+                    ));
+                let mut file = match std::fs::File::open(fragment_cid.0.clone())
+                {
+                    Ok(file) => file,
+                    Err(e) => {
+                        error!("open file {:?}", e);
+                        return resp_error;
+                    },
+                };
+                let mut buf = Vec::new();
+                if let Err(e) = file.read_to_end(&mut buf) {
+                    error!("read file {:?}", e);
+                    return resp_error;
+                }
+                match links.entry(chunk_id) {
+                    Entry::Occupied(o) => {
+                        let o = o.into_mut();
+                        o.insert(fragment_id, buf);
+                    },
+                    Entry::Vacant(v) => {
+                        let mut chunk_links: HashMap<u32, Vec<u8>> =
+                            HashMap::new();
+                        chunk_links.insert(fragment_id, buf);
+                        v.insert(chunk_links);
+                    },
+                }
+            },
+            Err((chunk_id, fragment_id, fragment_cid)) => {
+                return HttpResponse::InternalServerError().body(format!(
+                    "content {} chunk {} fragment {} not found",
+                    cid.0, chunk_id, fragment_id
+                ));
+            },
+        }
+    }
+
+    let object = data.codec.decode(links, object_size);
+    HttpResponse::Ok()
+        .content_type("text/markdown")
+        .body(object)
 }
 
 // #[actix_web::post("/get")]
