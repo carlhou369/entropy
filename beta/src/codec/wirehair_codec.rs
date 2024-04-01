@@ -161,6 +161,8 @@ impl WirehairCodec {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rand::RngCore;
 
     use crate::codec::wirehair_codec::WirehairCodec;
@@ -174,7 +176,27 @@ mod tests {
 
         let codec = WirehairCodec::new();
         let links = codec.encode(data.clone());
-        let recovered = codec.decode(links, data.len());
+        let mut rm_links = HashMap::new();
+        let max_chunks_cnt = 8;
+        let max_fragment_cnt = 40;
+        let mut chunks_cnt = 0;
+        for (chunk_id, chunk) in links.into_iter() {
+            chunks_cnt += 1;
+            if chunks_cnt > max_chunks_cnt {
+                break;
+            }
+            let mut fragment_cnt = 0;
+            let mut rm_chunk = HashMap::new();
+            for (fragment_id, fragment) in chunk {
+                fragment_cnt += 1;
+                if fragment_cnt > max_fragment_cnt {
+                    break;
+                }
+                rm_chunk.insert(fragment_id, fragment);
+            }
+            rm_links.insert(chunk_id, rm_chunk);
+        }
+        let recovered = codec.decode(rm_links, data.len());
 
         assert_eq!(data, recovered);
     }
