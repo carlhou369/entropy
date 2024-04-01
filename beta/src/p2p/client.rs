@@ -225,23 +225,27 @@ impl Client {
         cnt: usize,
     ) -> Result<Vec<PeerId>, P2PNetworkError> {
         let connected_peers = self.connected_peers.lock().await;
-        let closest_peers = self
-            .get_closest_peers(key)
-            .await?
-            .into_iter()
-            .collect::<HashSet<PeerId>>();
-        let intersact = connected_peers
-            .intersection(&closest_peers)
+        // let closest_peers = self
+        //     .get_closest_peers(key)
+        //     .await?
+        //     .into_iter()
+        //     .collect::<HashSet<PeerId>>();
+        // let intersact = connected_peers
+        //     .intersection(&closest_peers)
+        //     .map(|x| x.to_owned())
+        //     .collect::<Vec<PeerId>>();
+        let v = connected_peers
+            .iter()
             .map(|x| x.to_owned())
             .collect::<Vec<PeerId>>();
         let mut rng = thread_rng();
-        let chosen = intersact
+        let chosen = v
             .choose_multiple(&mut rng, cnt)
             .map(|x| x.to_owned())
             .collect::<Vec<PeerId>>();
-        if chosen.len() != cnt {
-            return Err(P2PNetworkError::Other("not enough".to_string()));
-        }
+        // if chosen.len() != cnt {
+        //     return Err(P2PNetworkError::Other("not enough".to_string()));
+        // }
         Ok(chosen)
     }
     pub async fn handle_event(&self) {
@@ -343,21 +347,6 @@ impl Client {
                                 error!("read file {:?}", e);
                                 continue;
                             }
-                            // respond first
-                            // action_sender_dup
-                            //     .send(Action::SendResponse {
-                            //         response: PeerResponse(
-                            //             PeerResponseMessage {
-                            //                 id: request.0.id,
-                            //                 command: GET_CHUNK_ACK_CMD
-                            //                     .to_string(),
-                            //                 data: b"ack".to_vec(),
-                            //             },
-                            //         ),
-                            //         channel,
-                            //     })
-                            //     .await
-                            //     .unwrap();
                             //send
                             if let Err(e) =
                                 self.send_chunk(peer_id, chunk).await
@@ -440,8 +429,8 @@ impl Client {
                     peer_id,
                     connection_id,
                 } => {
-                    let mut peers = peers_clone.lock().await;
-                    peers.remove(&peer_id);
+                    // let mut peers = peers_clone.lock().await;
+                    // peers.remove(&peer_id);
                     info!("connection closed peerID {peer_id} connectionID {connection_id}");
                 },
                 _ => {},

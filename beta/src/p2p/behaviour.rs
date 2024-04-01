@@ -3,6 +3,7 @@ use crate::CID;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use tempfile::NamedTempFile;
 
 use libp2p::core::ConnectedPoint;
@@ -180,7 +181,7 @@ impl Network {
                         "/entropy/0.1.0".into(),
                         key.public(),
                     )),
-                    ping: ping::Behaviour::new(ping::Config::new()),
+                    ping: ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(1))),
                     stream: libp2p_stream::Behaviour::new(),
                 })
             })
@@ -497,6 +498,7 @@ impl Network {
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, peer_addr.clone());
+                    // DialOpts::peer_id(peer_id).condition(PeerCondition::Always)
                     match self
                         .swarm
                         .dial(peer_addr.with(Protocol::P2p(peer_id)))
