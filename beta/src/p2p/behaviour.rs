@@ -1,4 +1,5 @@
 use crate::p2p::error::P2PNetworkError;
+use crate::CID;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
@@ -14,7 +15,9 @@ use libp2p::{
     identify, identity, kad,
     multiaddr::Protocol,
     noise, ping,
-    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
+    request_response::{
+        self, OutboundRequestId, ProtocolSupport, ResponseChannel,
+    },
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId,
 };
@@ -30,8 +33,8 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
-#[derive(Eq, Hash, PartialEq, Clone)]
-pub struct ChunkID(pub Vec<u8>);
+// #[derive(Eq, Hash, PartialEq, Clone, Debug)]
+// pub struct ChunkID(pub Vec<u8>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRequest(pub PeerRequestMessage);
@@ -41,7 +44,8 @@ pub struct PeerResponse(pub PeerResponseMessage);
 
 #[derive(NetworkBehaviour)]
 pub struct Behaviour {
-    request_response: request_response::cbor::Behaviour<PeerRequest, PeerResponse>,
+    request_response:
+        request_response::cbor::Behaviour<PeerRequest, PeerResponse>,
     kademlia: kad::Behaviour<kad::store::MemoryStore>,
     #[cfg(feature = "gossipsub")]
     gossipsub: gossipsub::Behaviour,
@@ -98,7 +102,7 @@ pub enum Event {
     // Chunk Received
     ChunkReceived {
         peer_id: PeerId,
-        chunk_id: ChunkID,
+        chunk_id: CID,
     },
     // Event when bootstrap done.
     Bootstrap,
@@ -108,9 +112,12 @@ pub struct Network {
     swarm: Swarm<Behaviour>,
     action_receiver: mpsc::Receiver<Action>,
     event_sender: mpsc::Sender<Event>,
-    pending_request:
-        HashMap<OutboundRequestId, oneshot::Sender<Result<PeerResponse, P2PNetworkError>>>,
-    pending_get_peers: HashMap<QueryId, oneshot::Sender<Result<Vec<PeerId>, P2PNetworkError>>>,
+    pending_request: HashMap<
+        OutboundRequestId,
+        oneshot::Sender<Result<PeerResponse, P2PNetworkError>>,
+    >,
+    pending_get_peers:
+        HashMap<QueryId, oneshot::Sender<Result<Vec<PeerId>, P2PNetworkError>>>,
     pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), P2PNetworkError>>>,
 }
 
@@ -133,7 +140,9 @@ impl Network {
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, || plex_config)?
+            .with_tcp(tcp::Config::default(), noise::Config::new, || {
+                plex_config
+            })?
             .with_behaviour(|key| {
                 #[cfg(feature = "gossipsub")]
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -142,7 +151,9 @@ impl Network {
                     .unwrap();
                 let mut kad_config = Config::default();
                 kad_config
-                    .set_protocol_names(vec![StreamProtocol::new("/entropy_kad")])
+                    .set_protocol_names(vec![StreamProtocol::new(
+                        "/entropy_kad",
+                    )])
                     .set_caching(Caching::Enabled { max_peers: 10 });
                 Ok(Behaviour {
                     kademlia: kad::Behaviour::with_config(
@@ -151,7 +162,10 @@ impl Network {
                         kad_config,
                     ),
                     request_response: request_response::cbor::Behaviour::new(
-                        [(StreamProtocol::new("/reqres"), ProtocolSupport::Full)],
+                        [(
+                            StreamProtocol::new("/reqres"),
+                            ProtocolSupport::Full,
+                        )],
                         request_response::Config::default()
                             .with_request_timeout(Duration::from_secs(100)),
                     ),
@@ -170,7 +184,9 @@ impl Network {
                 })
             })
             .map_err(|e| P2PNetworkError::NewBehaviourError(format!("{e}")))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c| {
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            })
             .build();
 
         swarm
@@ -209,7 +225,8 @@ impl Network {
 
         let mut inter = tokio::time::interval(Duration::from_secs(10));
         let mut control = self.swarm.behaviour().stream.new_control();
-        let mut incomming_stream = control.accept(Self::stream_protocol()).unwrap();
+        let mut incomming_stream =
+            control.accept(Self::stream_protocol()).unwrap();
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_event(event).await,
@@ -244,11 +261,11 @@ impl Network {
                     }
                     hasher.update(&buffer[..bytes_read]);
                     temp_file.write_all(&buffer[..bytes_read]).unwrap();
-                }
+                },
                 Err(e) => {
                     error!("handle stream {e:?}");
                     break;
-                }
+                },
             }
         }
         let hash = hasher.finalize();
@@ -258,7 +275,7 @@ impl Network {
         self.event_sender
             .send(Event::ChunkReceived {
                 peer_id,
-                chunk_id: ChunkID(hash.as_bytes().to_vec()),
+                chunk_id: CID(hash.to_string()),
             })
             .await
             .unwrap();
@@ -275,13 +292,15 @@ impl Network {
                 },
             )) => {
                 debug!("bootstrap result {res:?}");
-            }
+            },
 
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
                     result:
-                        kad::QueryResult::GetClosestPeers(Ok(kad::GetClosestPeersOk { peers, key: _ })),
+                        kad::QueryResult::GetClosestPeers(Ok(
+                            kad::GetClosestPeersOk { peers, key: _ },
+                        )),
                     // stats,
                     ..
                 },
@@ -289,11 +308,13 @@ impl Network {
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     let _ = sender.send(Ok(peers.clone()));
                     debug!("get peers progress {peers:?}");
-                    if let Some(mut q) = self.swarm.behaviour_mut().kademlia.query_mut(&id) {
+                    if let Some(mut q) =
+                        self.swarm.behaviour_mut().kademlia.query_mut(&id)
+                    {
                         q.finish();
                     }
                 }
-            }
+            },
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     id,
@@ -305,13 +326,16 @@ impl Network {
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     debug!("get closest peers error {e}");
                     if step.last {
-                        let _ = sender.send(Err(P2PNetworkError::KadQueryError(e)));
-                        if let Some(mut q) = self.swarm.behaviour_mut().kademlia.query_mut(&id) {
+                        let _ =
+                            sender.send(Err(P2PNetworkError::KadQueryError(e)));
+                        if let Some(mut q) =
+                            self.swarm.behaviour_mut().kademlia.query_mut(&id)
+                        {
                             q.finish();
                         }
                     }
                 }
-            }
+            },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::Message { message, .. },
             )) => match message {
@@ -320,9 +344,9 @@ impl Network {
                 } => {
                     let data = request.0.data.clone();
                     if request.0.command == *"multiaddress" {
-                        if let Ok(remote_address) =
-                            Multiaddr::from_str(String::from_utf8(data).unwrap().as_str())
-                        {
+                        if let Ok(remote_address) = Multiaddr::from_str(
+                            String::from_utf8(data).unwrap().as_str(),
+                        ) {
                             if let Some(Protocol::P2p(remote_peer_id)) =
                                 remote_address.iter().last()
                             {
@@ -334,7 +358,10 @@ impl Network {
                                 self.swarm
                                     .behaviour_mut()
                                     .kademlia
-                                    .add_address(&remote_peer_id, remote_address);
+                                    .add_address(
+                                        &remote_peer_id,
+                                        remote_address,
+                                    );
                             }
                         }
                     }
@@ -345,7 +372,7 @@ impl Network {
                         })
                         .await
                         .expect("Event receiver not to be dropped.");
-                }
+                },
                 request_response::Message::Response {
                     request_id,
                     response,
@@ -355,30 +382,33 @@ impl Network {
                         .remove(&request_id)
                         .expect("Request to still be pending.")
                         .send(Ok(response));
-                }
+                },
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::OutboundFailure {
-                    request_id, error, ..
+                    request_id,
+                    error,
+                    ..
                 },
             )) => {
+                error!("send request failure error {error}");
                 let _ = self
                     .pending_request
                     .remove(&request_id)
                     .expect("Request to still be pending.")
                     .send(Err(P2PNetworkError::SendRequestFailure(error)));
-            }
+            },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
-            )) => {}
+            )) => {},
             SwarmEvent::NewListenAddr { address, .. } => {
                 let local_peer_id = *self.swarm.local_peer_id();
                 info!(
                     "Local node is listening on {:?}",
                     address.with(Protocol::P2p(local_peer_id))
                 );
-            }
-            SwarmEvent::IncomingConnection { .. } => {}
+            },
+            SwarmEvent::IncomingConnection { .. } => {},
             SwarmEvent::ConnectionEstablished {
                 peer_id,
                 connection_id,
@@ -387,7 +417,8 @@ impl Network {
             } => {
                 match endpoint {
                     ConnectedPoint::Dialer { address, .. } => {
-                        if let Some(sender) = self.pending_dial.remove(&peer_id) {
+                        if let Some(sender) = self.pending_dial.remove(&peer_id)
+                        {
                             let _ = sender.send(Ok(()));
                             self.swarm
                                 .behaviour_mut()
@@ -395,7 +426,7 @@ impl Network {
                                 .add_address(&peer_id, address.clone());
                         }
                         debug!("connection dialer address {address}");
-                    }
+                    },
                     ConnectedPoint::Listener { send_back_addr, .. } => {
                         self.event_sender
                             .send(Event::IncomeConnection {
@@ -405,10 +436,10 @@ impl Network {
                             .await
                             .expect("Event receiver not to be dropped.");
                         debug!("connection listener send back address {send_back_addr}");
-                    }
+                    },
                 }
                 debug!("connected to {peer_id}");
-            }
+            },
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 connection_id,
@@ -424,15 +455,16 @@ impl Network {
                     .await
                     .expect("Event receiver not to be dropped.");
                 debug!("connection closed {peer_id}, cause {cause:?}");
-            }
+            },
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 if let Some(peer_id) = peer_id {
                     if let Some(sender) = self.pending_dial.remove(&peer_id) {
-                        let _ = sender.send(Err(P2PNetworkError::DialError(error)));
+                        let _ =
+                            sender.send(Err(P2PNetworkError::DialError(error)));
                     }
                 }
-            }
-            SwarmEvent::IncomingConnectionError { .. } => {}
+            },
+            SwarmEvent::IncomingConnectionError { .. } => {},
             SwarmEvent::Dialing {
                 peer_id: Some(peer_id),
                 ..
@@ -444,35 +476,43 @@ impl Network {
     async fn handle_action(&mut self, command: Action) {
         match command {
             Action::Bootstrap {} => {
-                let _ = self.swarm.behaviour_mut().kademlia.bootstrap().unwrap();
-            }
+                let _ =
+                    self.swarm.behaviour_mut().kademlia.bootstrap().unwrap();
+            },
             Action::GetPeers { key, sender } => {
-                let query_id = self.swarm.behaviour_mut().kademlia.get_closest_peers(key);
+                let query_id =
+                    self.swarm.behaviour_mut().kademlia.get_closest_peers(key);
                 self.pending_get_peers.insert(query_id, sender);
-            }
+            },
             Action::Dial {
                 peer_id,
                 peer_addr,
                 sender,
             } => {
-                if let hash_map::Entry::Vacant(e) = self.pending_dial.entry(peer_id) {
+                if let hash_map::Entry::Vacant(e) =
+                    self.pending_dial.entry(peer_id)
+                {
                     self.swarm
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, peer_addr.clone());
-                    match self.swarm.dial(peer_addr.with(Protocol::P2p(peer_id))) {
+                    match self
+                        .swarm
+                        .dial(peer_addr.with(Protocol::P2p(peer_id)))
+                    {
                         Ok(()) => {
                             e.insert(sender);
-                        }
+                        },
                         Err(e) => {
-                            let _ = sender.send(Err(P2PNetworkError::DialError(e)));
-                        }
+                            let _ =
+                                sender.send(Err(P2PNetworkError::DialError(e)));
+                        },
                     }
                 } else {
                     // already dialing
                     warn!("already dialing {peer_id}")
                 }
-            }
+            },
             Action::SendRequest {
                 peer_id,
                 msg,
@@ -484,14 +524,14 @@ impl Network {
                     .request_response
                     .send_request(&peer_id, msg);
                 self.pending_request.insert(req_id, sender);
-            }
+            },
             Action::SendResponse { response, channel } => {
                 self.swarm
                     .behaviour_mut()
                     .request_response
                     .send_response(channel, response)
                     .unwrap();
-            }
+            },
         }
     }
 

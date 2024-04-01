@@ -1,7 +1,8 @@
 use std::io;
 
 use libp2p::{
-    kad::GetClosestPeersError, request_response::OutboundFailure, swarm::DialError, Multiaddr,
+    kad::GetClosestPeersError, request_response::OutboundFailure,
+    swarm::DialError, Multiaddr,
 };
 
 use tempfile::PersistError;
@@ -27,4 +28,8 @@ pub enum P2PNetworkError {
     PersisError(#[from] PersistError),
     #[error("open stream error")]
     OpenStreamError(String),
+    #[error("serde json error")]
+    SerializeError(#[from] serde_json::Error),
+    #[error("other error")]
+    Other(String),
 }

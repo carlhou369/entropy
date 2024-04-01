@@ -1,11 +1,32 @@
+use serde::{Deserialize, Serialize};
+
 pub mod codec;
-pub mod server;
-pub mod p2p;
 pub mod keystore;
+pub mod p2p;
+pub mod peer;
+pub mod server;
 mod vrf;
 
 pub mod reqres_proto {
     include!(concat!(env!("OUT_DIR"), "/reqres_proto.rs"));
+}
+
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash, Default,
+)]
+pub struct CID(String);
+
+pub fn cid(content: &[u8]) -> CID {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(content);
+    let hash = hasher.finalize();
+    CID(hash.to_string())
+}
+
+impl Into<Vec<u8>> for CID {
+    fn into(self) -> Vec<u8> {
+        self.0.into_bytes().to_vec()
+    }
 }
 
 #[cfg(test)]

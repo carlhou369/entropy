@@ -3,14 +3,14 @@ use beta::p2p::behaviour::Network;
 use beta::p2p::client::Client;
 use beta::p2p::utils::random_req_id;
 use beta::reqres_proto::PeerRequestMessage;
-use beta::server;
+use beta::{cid, server, CID};
 use clap::Parser;
 use env_logger::{Builder, Env};
 use futures::future;
 use futures::{channel::mpsc, future::join_all};
 use libp2p::PeerId;
 use libp2p::{multiaddr::Protocol, Multiaddr};
-use log::info;
+use log::{error, info};
 use rand::distributions::Uniform;
 use rand::{random, Rng};
 use tokio::sync::Mutex;
@@ -76,12 +76,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let bench_light_node_cnt: usize = cli.bench_peers.unwrap_or(DEFAULT_BENCH_CNT);
+    let bench_light_node_cnt: usize =
+        cli.bench_peers.unwrap_or(DEFAULT_BENCH_CNT);
     let payload_size: usize = cli.payload_size.unwrap_or(1024 * 1024);
 
     // Init keystore
     let path = cli.key.unwrap_or(PathBuf::from("./keystore"));
-    let keystore = KeyStore::generate_from_file(path.clone()).unwrap_or(KeyStore::generate());
+    let keystore = KeyStore::generate_from_file(path.clone())
+        .unwrap_or(KeyStore::generate());
     keystore.save_to(path).unwrap();
 
     // Demo p2p
@@ -89,21 +91,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (event_sender, event_receiver) = mpsc::channel(0);
 
     // New p2p Network
-    let network = Network::new(Some(keystore.seed), action_receiver, event_sender)
-        .await
-        .unwrap();
+    let network =
+        Network::new(Some(keystore.seed), action_receiver, event_sender)
+            .await
+            .unwrap();
 
     let control = network.control();
 
     let port = cli.port.unwrap_or_else(|| 6000 + random::<u16>() % 100);
     info!("start p2p at {port}");
-    let mut address_local: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", port).parse().unwrap();
+    let mut address_local: Multiaddr =
+        format!("/ip4/127.0.0.1/tcp/{}", port).parse().unwrap();
 
     let local_peer_id = network.local_peer_id();
     address_local = address_local.with_p2p(local_peer_id).unwrap();
+    info!("local peer id {}", local_peer_id.clone().to_string());
 
     // New client
     let client = Client::new(
+        local_peer_id,
         address_local.clone(),
         action_sender.clone(),
         Arc::new(Mutex::new(event_receiver)),
@@ -139,7 +145,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // Demo discovery query random peers
                 let key = PeerId::random();
-                let res = client.get_closest_peers(key).await.unwrap();
+                let res = client.get_closest_peers(key.into()).await.unwrap();
                 info!("get closest peers {:?}", res);
             }
         } else {
@@ -149,7 +155,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Start as full node demo
         let mut rng = rand::thread_rng();
         let between = Uniform::from(0..=255);
-        let payload: Vec<u8> = (0..payload_size).map(|_| rng.sample(between)).collect();
+        let payload: Vec<u8> =
+            (0..payload_size).map(|_| rng.sample(between)).collect();
 
         // Bench send data large chunk
         let mut inter = time::interval(Duration::from_secs(1));
@@ -161,12 +168,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let start_time = Instant::now();
                 let mut tasks = Vec::new();
                 for peer_id in peers.iter() {
-                    let task = client.send_chunk(peer_id.to_owned(), payload.clone());
+                    let task =
+                        client.send_chunk(peer_id.to_owned(), payload.clone());
                     tasks.push(task);
                 }
                 join_all(tasks).await;
                 let dur = Instant::now() - start_time;
-                info!("send chunks and wait ack takes {:?} ms", dur.as_millis());
+                info!(
+                    "send chunks and wait ack takes {:?} ms",
+                    dur.as_millis()
+                );
+                // test get chunk
+                if let Err(e) = client.get_chunk(peers[0], cid(&payload)).await
+                {
+                    error!("get chunk error {e:?}");
+                };
                 break;
             }
         }
