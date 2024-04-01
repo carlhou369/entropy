@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    cid,
     p2p::{behaviour::Network, utils::random_req_id},
     reqres_proto::{PeerRequestMessage, PeerResponseMessage},
     CID,
@@ -191,13 +192,12 @@ impl Client {
         let mut action_sender_dup = self.action_sender.clone();
         let (sender, receiver) = oneshot::channel();
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&chunk);
-        let hash = hasher.finalize();
+        let cid = cid(&chunk);
+        let data = serde_json::to_vec(&PushChunkReq { chunk_id: cid })?;
         let msg = PeerRequest(PeerRequestMessage {
             id: random_req_id(),
             command: PUSH_CHUNK_CMD.to_string(),
-            data: hash.as_bytes().to_vec(),
+            data,
         });
 
         action_sender_dup
@@ -209,15 +209,15 @@ impl Client {
             .await
             .unwrap();
 
-        // let mut stream = control
-        //     .open_stream(peer_id.to_owned(), Network::stream_protocol())
-        //     .await
-        //     .map_err(|error| {
-        //         error!("{error}");
-        //         P2PNetworkError::OpenStreamError(format!("{peer_id},{error:?}"))
-        //     })?;
-        // stream.write_all(&chunk).await.unwrap();
-        // stream.close().await.unwrap();
+        let mut stream = control
+            .open_stream(peer_id.to_owned(), Network::stream_protocol())
+            .await
+            .map_err(|error| {
+                error!("{error}");
+                P2PNetworkError::OpenStreamError(format!("{peer_id},{error:?}"))
+            })?;
+        stream.write_all(&chunk).await.unwrap();
+        stream.close().await.unwrap();
         receiver.await.unwrap()?;
         Ok(())
     }
@@ -256,19 +256,31 @@ impl Client {
                 Event::InboundRequest { request, channel } => {
                     debug!("handle inboud request");
                     match PeerCommand::from(request.0.command.clone()) {
-                        PeerCommand::PushChunkAck => {},
-                        PeerCommand::GetChunkAck => {},
+                        PeerCommand::PushChunkAck => {
+                            info!("PushChunkAck req");
+                        },
+                        PeerCommand::GetChunkAck => {
+                            info!("PushChunkAck req");
+                        },
                         PeerCommand::PushChunk => {
+                            info!("push chunk req");
                             let mut pendind_chunks =
                                 self.pending_chunks.lock().await;
 
                             let mut chunk_id = CID::default();
-                            match String::from_utf8(request.0.data.clone()) {
-                                Ok(cid_str) => chunk_id = CID(cid_str),
-                                Err(_) => {
+
+                            match serde_json::from_slice::<PushChunkReq>(
+                                &request.0.data,
+                            ) {
+                                Ok(req) => {
+                                    chunk_id = req.chunk_id;
+                                },
+                                Err(e) => {
+                                    error!("parse error {:?}", e);
                                     continue;
                                 },
                             }
+                            info!("chunk id {}", chunk_id.0.clone());
                             if let Some(ChunkState::Saved(_chunk_id)) =
                                 pendind_chunks.remove(&chunk_id)
                             {
@@ -301,6 +313,7 @@ impl Client {
                             }
                         },
                         PeerCommand::GetChunk => {
+                            info!("GetChunk req");
                             //parse req
                             let req = match serde_json::from_slice::<GetChunkReq>(
                                 &request.0.data,
@@ -328,12 +341,14 @@ impl Client {
                                 req.chunk_id.0.as_str(),
                             ) {
                                 Ok(file) => file,
-                                Err(_) => {
+                                Err(e) => {
+                                    error!("open file {:?}", e);
                                     continue;
                                 },
                             };
                             let mut chunk = Vec::new();
-                            if let Err(_) = file.read_to_end(&mut chunk) {
+                            if let Err(e) = file.read_to_end(&mut chunk) {
+                                error!("read file {:?}", e);
                                 continue;
                             }
                             // respond first
@@ -374,6 +389,7 @@ impl Client {
                             };
                         },
                         PeerCommand::Other => {
+                            info!("Other req");
                             action_sender_dup
                                 .send(Action::SendResponse {
                                     response: PeerResponse(
@@ -446,6 +462,11 @@ impl Client {
 struct GetChunkReq {
     chunk_id: CID,
     peer_id: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PushChunkReq {
+    chunk_id: CID,
 }
 
 impl Debug for Client {

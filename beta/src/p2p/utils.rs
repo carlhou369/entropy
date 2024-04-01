@@ -37,21 +37,21 @@ pub async fn bootstrap_peer(
         action_sender.send(Action::Bootstrap {}).await.unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        // // Acknowledge multiaddress
-        // let (sender, receiver) = oneshot::channel();
-        // action_sender
-        //     .send(Action::SendRequest {
-        //         peer_id,
-        //         msg: PeerRequest(PeerRequestMessage {
-        //             id: format!("{}", random::<u16>()),
-        //             command: "multiaddress".to_string(),
-        //             data: address_local.clone().to_string().as_bytes().to_vec(),
-        //         }),
-        //         sender,
-        //     })
-        //     .await
-        //     .unwrap();
-        // receiver.await.unwrap().unwrap();
+        // Acknowledge multiaddress
+        let (sender, receiver) = oneshot::channel();
+        action_sender
+            .send(Action::SendRequest {
+                peer_id,
+                msg: PeerRequest(PeerRequestMessage {
+                    id: format!("{}", random::<u16>()),
+                    command: "multiaddress".to_string(),
+                    data: address_local.clone().to_string().as_bytes().to_vec(),
+                }),
+                sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap().unwrap();
         Ok(())
     } else {
         Err(P2PNetworkError::MultiAddrFormatError(full_node))

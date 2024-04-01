@@ -167,7 +167,8 @@ impl Network {
                             ProtocolSupport::Full,
                         )],
                         request_response::Config::default()
-                            .with_request_timeout(Duration::from_secs(100)),
+                            .with_request_timeout(Duration::from_secs(100))
+                            .with_max_concurrent_streams(1000),
                     ),
                     #[cfg(feature = "gossipsub")]
                     gossipsub: gossipsub::Behaviour::new(
@@ -270,7 +271,7 @@ impl Network {
         }
         let hash = hasher.finalize();
 
-        temp_file.persist(format!("{}", hash))?;
+        temp_file.persist(hash.to_string())?;
         stream.write_all(b"hello").await?;
         self.event_sender
             .send(Event::ChunkReceived {
