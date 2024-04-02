@@ -6,7 +6,7 @@ use std::{
 
 use actix_web::web::{self, Query};
 use libp2p::PeerId;
-use log::{error, info};
+use log::{debug, error, info};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
@@ -33,6 +33,8 @@ use {
 
 const MAX_OUTBOUND_STREAM: usize = 10;
 
+const MAX_INBOUND_STREAM: usize = 1;
+
 #[derive(Debug, Clone)]
 struct ContentMeta {
     pub chunk_meta: HashMap<u32, HashMap<u32, (CID, Vec<PeerId>)>>,
@@ -47,7 +49,8 @@ struct PeerState {
     pub content_log: Mutex<HashMap<CID, ContentMeta>>,
     pub codec: WirehairCodec,
     pub p2p_client: Client,
-    pub stream_sema: Arc<Semaphore>,
+    outbound_stream_sema: Arc<Semaphore>,
+    inbound_stream_sema: Arc<Semaphore>,
 }
 
 impl PeerState {
@@ -63,7 +66,8 @@ impl PeerState {
             content_log: Mutex::new(HashMap::new()),
             codec,
             p2p_client,
-            stream_sema: Arc::new(Semaphore::new(MAX_OUTBOUND_STREAM)),
+            outbound_stream_sema: Arc::new(Semaphore::new(MAX_OUTBOUND_STREAM)),
+            inbound_stream_sema: Arc::new(Semaphore::new(MAX_INBOUND_STREAM)),
         }
     }
 }
@@ -87,9 +91,14 @@ async fn put(
     let msg = form.files[0].data.as_ref().to_vec();
     let object_size = msg.len();
     let msg_cid = cid(&msg);
-    info!("msg size {}, cid {}", object_size, msg_cid.0.clone());
+
+    if data.content_log.lock().await.contains_key(&msg_cid.clone()) {
+        return HttpResponse::Ok().body(msg_cid.0);
+    }
+
+    info!("put msg size {}, cid {}", object_size, msg_cid.0.clone());
     let chunks = data.codec.encode(msg);
-    info!("chunks encoded");
+    debug!("chunks encoded");
     let mut content_meta = HashMap::new();
     let mut set = JoinSet::new();
     for (chunk_id, chunk) in chunks.into_iter() {
@@ -110,7 +119,7 @@ async fn put(
             for peer in closest.clone().into_iter() {
                 let client = data.p2p_client.clone();
                 let fragment_clone = fragment.clone();
-                let sema = data.stream_sema.clone();
+                let sema = data.outbound_stream_sema.clone();
                 set.spawn(async move {
                     let permit = sema.acquire().await.unwrap();
                     let fragment_cid = cid(&fragment_clone);
@@ -168,90 +177,100 @@ async fn get(
 
     let object_size = content_meta.size as usize;
     let mut links: HashMap<u32, HashMap<u32, Vec<u8>>> = HashMap::new();
-    let mut tasks: HashMap<PeerId, Vec<(u32, u32, CID)>> = HashMap::new();
-
+    let mut set = JoinSet::new();
     for (chunk_id, chunk_meta) in content_meta.chunk_meta.into_iter() {
         for (fragment_id, (fragment_cid, light_peers)) in chunk_meta.into_iter()
         {
-            for peer_id in light_peers.clone() {
-                match tasks.entry(peer_id.clone()) {
-                    Entry::Occupied(o) => {
-                        let o = o.into_mut();
-                        o.push((chunk_id, fragment_id, fragment_cid.clone()));
-                    },
-                    Entry::Vacant(v) => {
-                        let ts =
-                            vec![(chunk_id, fragment_id, fragment_cid.clone())];
-                        v.insert(ts);
-                    },
+            let client = data.p2p_client.clone();
+            let sema = data.inbound_stream_sema.clone();
+            set.spawn(async move {
+                let permit = sema.acquire().await.unwrap();
+                for light_peer in light_peers.into_iter() {
+                    debug!(
+                        "getting fragment {} from {}",
+                        fragment_cid.0.clone(),
+                        light_peer.clone()
+                    );
+                    match client
+                        .get_chunk(light_peer, fragment_cid.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            debug!(
+                                "done getting fragment {} from {}",
+                                fragment_cid.0.clone(),
+                                light_peer.clone()
+                            );
+                            drop(permit);
+                            return Ok((
+                                chunk_id,
+                                fragment_id,
+                                fragment_cid.clone(),
+                            ));
+                        },
+                        Err(e) => {
+                            debug!(
+                                "done getting fragment {} from {}",
+                                fragment_cid.0.clone(),
+                                light_peer.clone()
+                            );
+                            error!(
+                                "get chunk {} from peer {} error {}",
+                                fragment_cid.0.clone(),
+                                light_peer.clone(),
+                                e
+                            );
+                            continue;
+                        },
+                    };
                 }
-            }
+                drop(permit);
+                Err((chunk_id, fragment_id, fragment_cid.clone()))
+            });
         }
     }
-    info!("tasks");
-    info!("{tasks:?}");
-    let mut set = JoinSet::new();
-    for (peer_id, peer_task) in tasks.into_iter() {
-        info!(
-            "peer {} task cnt {}",
-            peer_id.clone().to_string(),
-            peer_task.len()
-        );
-        let client = data.p2p_client.clone();
-        set.spawn(async move {
-            let mut done_task = vec![];
-            for task in peer_task.into_iter() {
-                info!("get chunk peer {} cid {}",peer_id.clone().to_string(),task.2.0.clone());
-                match client.get_chunk(peer_id, task.2.clone()).await {
-                    Ok(()) => {
-                        done_task.push(task);
-                    },
+
+    while let Some(res) = set.join_next().await {
+        let res = res.unwrap();
+        match res {
+            Ok((chunk_id, fragment_id, fragment_cid)) => {
+                // let resp_error =
+                //     HttpResponse::InternalServerError().body(format!(
+                //         "content {} chunk {} fragment {} not found",
+                //         cid.0, chunk_id, fragment_id
+                //     ));
+                let mut file = match std::fs::File::open(fragment_cid.0.clone())
+                {
+                    Ok(file) => file,
                     Err(e) => {
-                        error!(
-                            "get chunk {} fragment {} fragment_cid {} from peer {} error {}",
-                            task.0.clone(),
-                            task.1.clone(),
-                            task.2.0.clone(),
-                            peer_id.clone(),
-                            e,
-                        );
+                        error!("open file {:?}", e);
                         continue;
                     },
                 };
-            }
-            done_task
-        });
-    }
-
-    while let Some(done_task) = set.join_next().await {
-        let res = done_task.unwrap();
-        for s in res {
-            let chunk_id = s.0;
-            let fragment_id = s.1;
-            let fragment_cid = s.2;
-            let mut file = match std::fs::File::open(fragment_cid.0.clone()) {
-                Ok(file) => file,
-                Err(e) => {
-                    error!("open file {:?}", e);
+                let mut buf = Vec::new();
+                if let Err(e) = file.read_to_end(&mut buf) {
+                    error!("read file {:?}", e);
                     continue;
-                },
-            };
-            let mut buf = Vec::new();
-            if let Err(e) = file.read_to_end(&mut buf) {
-                error!("read file {:?}", e);
-                continue;
-            }
-            match links.entry(chunk_id) {
-                Entry::Occupied(o) => {
-                    let o = o.into_mut();
-                    o.insert(fragment_id, buf);
-                },
-                Entry::Vacant(v) => {
-                    let mut chunk_links: HashMap<u32, Vec<u8>> = HashMap::new();
-                    chunk_links.insert(fragment_id, buf);
-                    v.insert(chunk_links);
-                },
-            }
+                }
+                match links.entry(chunk_id) {
+                    Entry::Occupied(o) => {
+                        let o = o.into_mut();
+                        o.insert(fragment_id, buf);
+                    },
+                    Entry::Vacant(v) => {
+                        let mut chunk_links: HashMap<u32, Vec<u8>> =
+                            HashMap::new();
+                        chunk_links.insert(fragment_id, buf);
+                        v.insert(chunk_links);
+                    },
+                }
+            },
+            Err((chunk_id, fragment_id, _fragment_cid)) => {
+                return HttpResponse::InternalServerError().body(format!(
+                    "content {} chunk {} fragment {} not found",
+                    cid.0, chunk_id, fragment_id
+                ));
+            },
         }
     }
 

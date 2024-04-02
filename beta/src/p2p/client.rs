@@ -37,7 +37,7 @@ const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
 
 const MAX_PENDING_SEND_PER_PEER: usize = 3;
-const MAX_PENDING_GET_PER_PEER: usize = 3;
+const MAX_PENDING_GET_PER_PEER: usize = 1;
 
 pub enum PeerCommand {
     PushChunkAck,
@@ -180,48 +180,61 @@ impl Client {
         peer_id: PeerId,
         chunk_id: CID,
     ) -> Result<(), P2PNetworkError> {
-        let mut pending_gets = self.pending_gets.lock().await;
         let (done_sender, done_recv) = oneshot::channel();
-        match pending_gets.entry(peer_id.clone()) {
-            Entry::Occupied(o) => {
-                let sender = o.into_mut();
-                sender
-                    .send(GetChunkTask {
-                        chunk_id,
-                        peer_id,
-                        done_sender,
-                    })
-                    .await
-                    .unwrap();
-            },
-            Entry::Vacant(v) => {
-                let (mut sender, mut recv) =
-                    mpsc::channel::<GetChunkTask>(MAX_PENDING_GET_PER_PEER);
-                let action_sender = self.action_sender.clone();
-                let local_peer_id = self.local_peer_id.clone();
-                tokio::spawn(async move {
-                    while let Some(task) = recv.next().await {
-                        let action_sender = action_sender.clone();
-                        handle_get_chunk(
-                            local_peer_id,
-                            action_sender,
-                            task.peer_id,
-                            task.chunk_id,
-                            task.done_sender,
-                        )
-                        .await;
-                    }
-                });
-                sender
-                    .send(GetChunkTask {
-                        chunk_id,
-                        peer_id,
-                        done_sender,
-                    })
-                    .await
-                    .unwrap();
-                v.insert(sender);
-            },
+        {
+            let mut pending_gets = self.pending_gets.lock().await;
+            match pending_gets.entry(peer_id.clone()) {
+                Entry::Occupied(o) => {
+                    let sender = o.into_mut();
+                    sender
+                        .send(GetChunkTask {
+                            chunk_id,
+                            peer_id,
+                            done_sender,
+                        })
+                        .await
+                        .unwrap();
+                },
+                Entry::Vacant(v) => {
+                    let (mut sender, mut recv) =
+                        mpsc::channel::<GetChunkTask>(MAX_PENDING_GET_PER_PEER);
+                    let action_sender = self.action_sender.clone();
+                    let local_peer_id = self.local_peer_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(task) = recv.next().await {
+                            let action_sender = action_sender.clone();
+                            debug!(
+                                "handle get chunk {} from {}",
+                                task.chunk_id.0.clone(),
+                                task.peer_id.clone()
+                            );
+                            handle_get_chunk(
+                                local_peer_id,
+                                action_sender,
+                                task.peer_id,
+                                task.chunk_id.clone(),
+                                task.done_sender,
+                            )
+                            .await;
+                            debug!(
+                                "done handle get chunk {} from {}",
+                                task.chunk_id.0.clone(),
+                                task.peer_id.clone()
+                            );
+                        }
+                    });
+                    sender
+                        .send(GetChunkTask {
+                            chunk_id,
+                            peer_id,
+                            done_sender,
+                        })
+                        .await
+                        .unwrap();
+                    v.insert(sender);
+                },
+            }
+            drop(pending_gets);
         }
         done_recv.await.unwrap()
     }
