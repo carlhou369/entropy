@@ -86,7 +86,7 @@ async fn put(
     let chunks = data.codec.encode(msg);
     info!("chunks encoded");
     let mut content_meta = HashMap::new();
-    // let mut set = JoinSet::new();
+    let mut set = JoinSet::new();
     for (chunk_id, chunk) in chunks.into_iter() {
         let mut chunk_meta = HashMap::new();
         for (fragment_id, fragment) in chunk.into_iter() {
@@ -105,16 +105,15 @@ async fn put(
             for peer in closest.clone().into_iter() {
                 let client = data.p2p_client.clone();
                 let fragment_clone = fragment.clone();
-                // set.spawn(async move {
-                let fragment_cid = cid(&fragment_clone);
-                info!(
-                    "sending light node {} fragment {}",
-                    peer.to_string(),
-                    fragment_cid.0
-                );
-                client.send_chunk(peer, fragment_clone).await.unwrap();
-                info!("done")
-                // });
+                set.spawn(async move {
+                    let fragment_cid = cid(&fragment_clone);
+                    info!(
+                        "sending light node {} fragment {}",
+                        peer.to_string(),
+                        fragment_cid.0
+                    );
+                    client.send_chunk(peer, fragment_clone).await
+                });
             }
 
             chunk_meta.insert(fragment_id.to_owned(), (fragment_cid, closest));
@@ -122,11 +121,11 @@ async fn put(
         content_meta.insert(chunk_id.to_owned(), chunk_meta);
     }
 
-    // while let Some(res) = set.join_next().await {
-    //     if let Err(e) = res.unwrap() {
-    //         error!("{e:?}");
-    //     };
-    // }
+    while let Some(res) = set.join_next().await {
+        if let Err(e) = res.unwrap() {
+            error!("{e:?}");
+        };
+    }
 
     data.content_log.lock().await.insert(
         msg_cid.clone(),

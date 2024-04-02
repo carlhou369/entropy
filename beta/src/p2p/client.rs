@@ -1,5 +1,6 @@
+use core::task;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap, HashSet},
     fmt::Debug,
     io::Read,
     sync::Arc,
@@ -11,6 +12,7 @@ use crate::{
     reqres_proto::{PeerRequestMessage, PeerResponseMessage},
     CID,
 };
+use actix::dev::OneshotSender;
 use futures::{
     channel::{mpsc, oneshot},
     AsyncWriteExt, SinkExt, StreamExt,
@@ -33,6 +35,8 @@ const PUSH_CHUNK_CMD: &str = "chunk_push";
 const GET_CHUNK_CMD: &str = "chunk_get";
 const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
+
+const MAX_PENDING_SEND_PER_PEER: usize = 5;
 
 pub enum PeerCommand {
     PushChunkAck,
@@ -67,6 +71,13 @@ pub enum ChunkState {
     Saved(CID),
 }
 
+#[derive(Debug)]
+struct SendChunkTask {
+    chunk: Vec<u8>,
+    peer_id: PeerId,
+    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
+}
+
 /// Client encapsulates the interface for interacting with the Network, handling network events.
 #[derive(Clone)]
 pub struct Client {
@@ -76,6 +87,7 @@ pub struct Client {
     pub event_receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
     pub connected_peers: Arc<Mutex<HashSet<PeerId>>>,
     pub pending_chunks: Arc<Mutex<HashMap<CID, ChunkState>>>,
+    pub pending_sends: Arc<Mutex<HashMap<PeerId, mpsc::Sender<SendChunkTask>>>>,
     control: Control,
 }
 
@@ -94,6 +106,7 @@ impl Client {
             event_receiver,
             connected_peers: Arc::new(Mutex::new(HashSet::new())),
             pending_chunks: Arc::new(Mutex::new(HashMap::new())),
+            pending_sends: Arc::new(Mutex::new(HashMap::new())),
             control,
         }
     }
@@ -179,44 +192,58 @@ impl Client {
         receiver.await.unwrap()?;
         Ok(())
     }
+
     // Send chunk data to a peer
     pub async fn send_chunk(
         &self,
         peer_id: PeerId,
         chunk: Vec<u8>,
     ) -> Result<(), P2PNetworkError> {
-        let mut control = self.control.clone();
-        let mut action_sender_dup = self.action_sender.clone();
-        let (sender, receiver) = oneshot::channel();
-
-        let cid = cid(&chunk);
-        let data = serde_json::to_vec(&PushChunkReq { chunk_id: cid })?;
-        let msg = PeerRequest(PeerRequestMessage {
-            id: random_req_id(),
-            command: PUSH_CHUNK_CMD.to_string(),
-            data,
-        });
-
-        action_sender_dup
-            .send(Action::SendRequest {
-                peer_id: peer_id.to_owned(),
-                msg: msg.clone(),
-                sender,
-            })
-            .await
-            .unwrap();
-
-        let mut stream = control
-            .open_stream(peer_id.to_owned(), Network::stream_protocol())
-            .await
-            .map_err(|error| {
-                error!("{error}");
-                P2PNetworkError::OpenStreamError(format!("{peer_id},{error:?}"))
-            })?;
-        stream.write_all(&chunk).await.unwrap();
-        stream.close().await.unwrap();
-        receiver.await.unwrap()?;
-        Ok(())
+        let mut pending_sends = self.pending_sends.lock().await;
+        let (done_sender, done_recv) = oneshot::channel();
+        match pending_sends.entry(peer_id.clone()) {
+            Entry::Occupied(o) => {
+                let sender = o.into_mut();
+                sender
+                    .send(SendChunkTask {
+                        chunk,
+                        peer_id,
+                        done_sender,
+                    })
+                    .await
+                    .unwrap();
+            },
+            Entry::Vacant(v) => {
+                let (mut sender, mut recv) =
+                    mpsc::channel::<SendChunkTask>(MAX_PENDING_SEND_PER_PEER);
+                let control = self.control.clone();
+                let action_sender = self.action_sender.clone();
+                tokio::spawn(async move {
+                    while let Some(task) = recv.next().await {
+                        let control = control.clone();
+                        let action_sender = action_sender.clone();
+                        handle_send_chunk(
+                            control,
+                            action_sender,
+                            task.peer_id,
+                            task.chunk,
+                            task.done_sender,
+                        )
+                        .await;
+                    }
+                });
+                sender
+                    .send(SendChunkTask {
+                        chunk,
+                        peer_id,
+                        done_sender,
+                    })
+                    .await
+                    .unwrap();
+                v.insert(sender);
+            },
+        }
+        done_recv.await.unwrap()
     }
 
     pub async fn random_closest_peer(
@@ -437,6 +464,64 @@ impl Client {
             }
         }
     }
+}
+
+async fn handle_send_chunk(
+    control: Control,
+    action_sender: mpsc::Sender<Action>,
+    peer_id: PeerId,
+    chunk: Vec<u8>,
+    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
+) {
+    let mut control = control.clone();
+    let mut action_sender_dup = action_sender.clone();
+    let (sender, receiver) = oneshot::channel();
+
+    let cid = cid(&chunk);
+    let data = serde_json::to_vec(&PushChunkReq {
+        chunk_id: cid.clone(),
+    })
+    .unwrap();
+    let msg = PeerRequest(PeerRequestMessage {
+        id: random_req_id(),
+        command: PUSH_CHUNK_CMD.to_string(),
+        data,
+    });
+
+    debug!(
+        "handle sending {} to {}",
+        cid.0.clone(),
+        peer_id.to_string()
+    );
+
+    action_sender_dup
+        .send(Action::SendRequest {
+            peer_id: peer_id.to_owned(),
+            msg: msg.clone(),
+            sender,
+        })
+        .await
+        .unwrap();
+
+    let mut stream = match control
+        .open_stream(peer_id.to_owned(), Network::stream_protocol())
+        .await
+        .map_err(|error| {
+            error!("{error}");
+            P2PNetworkError::OpenStreamError(format!("{peer_id},{error:?}"))
+        }) {
+        Ok(stream) => stream,
+        Err(e) => {
+            done_sender.send(Err(e));
+            return;
+        },
+    };
+    stream.write_all(&chunk).await.unwrap();
+    stream.close().await.unwrap();
+    match receiver.await.unwrap() {
+        Ok(_) => done_sender.send(Ok(())),
+        Err(e) => done_sender.send(Err(e)),
+    };
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

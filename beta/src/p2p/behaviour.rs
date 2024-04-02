@@ -135,14 +135,17 @@ impl Network {
             None => identity::Keypair::generate_ed25519(),
         };
         let peer_id = id_keys.public().to_peer_id();
-        let _yamux_config = yamux::Config::default();
+        let mut yamux_config = yamux::Config::default();
+        yamux_config.set_max_num_streams(1000);
+
         let mut plex_config = libp2p_mplex::MplexConfig::default();
-        plex_config.set_split_send_size(1024 * 1024 * 10);
+        plex_config.set_split_send_size(1024 * 10);
+        plex_config.set_max_num_streams(1000);
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
             .with_tcp(tcp::Config::default(), noise::Config::new, || {
-                plex_config
+                yamux_config
             })?
             .with_behaviour(|key| {
                 #[cfg(feature = "gossipsub")]
@@ -181,7 +184,11 @@ impl Network {
                         "/entropy/0.1.0".into(),
                         key.public(),
                     )),
-                    ping: ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(1))),
+                    ping: ping::Behaviour::new(
+                        ping::Config::new()
+                            .with_interval(Duration::from_secs(1))
+                            .with_timeout(Duration::from_secs(3)),
+                    ),
                     stream: libp2p_stream::Behaviour::new(),
                 })
             })

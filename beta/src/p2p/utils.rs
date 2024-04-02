@@ -64,3 +64,21 @@ pub fn random_req_id() -> String {
     rng.fill_bytes(&mut buf);
     hex::encode(buf)
 }
+
+pub struct Defer<F: FnOnce()> {
+    cleanup: Option<F>,
+}
+
+impl<F: FnOnce()> Defer<F> {
+    pub fn new(f: F) -> Defer<F> {
+        Defer { cleanup: Some(f) }
+    }
+}
+
+impl<F: FnOnce()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
