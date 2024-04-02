@@ -36,7 +36,8 @@ const GET_CHUNK_CMD: &str = "chunk_get";
 const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
 
-const MAX_PENDING_SEND_PER_PEER: usize = 5;
+const MAX_PENDING_SEND_PER_PEER: usize = 3;
+const MAX_PENDING_GET_PER_PEER: usize = 3;
 
 pub enum PeerCommand {
     PushChunkAck,
@@ -78,6 +79,13 @@ struct SendChunkTask {
     done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
 }
 
+#[derive(Debug)]
+struct GetChunkTask {
+    chunk_id: CID,
+    peer_id: PeerId,
+    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
+}
+
 /// Client encapsulates the interface for interacting with the Network, handling network events.
 #[derive(Clone)]
 pub struct Client {
@@ -87,7 +95,8 @@ pub struct Client {
     pub event_receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
     pub connected_peers: Arc<Mutex<HashSet<PeerId>>>,
     pub pending_chunks: Arc<Mutex<HashMap<CID, ChunkState>>>,
-    pub pending_sends: Arc<Mutex<HashMap<PeerId, mpsc::Sender<SendChunkTask>>>>,
+    pending_sends: Arc<Mutex<HashMap<PeerId, mpsc::Sender<SendChunkTask>>>>,
+    pending_gets: Arc<Mutex<HashMap<PeerId, mpsc::Sender<GetChunkTask>>>>,
     control: Control,
 }
 
@@ -107,6 +116,7 @@ impl Client {
             connected_peers: Arc::new(Mutex::new(HashSet::new())),
             pending_chunks: Arc::new(Mutex::new(HashMap::new())),
             pending_sends: Arc::new(Mutex::new(HashMap::new())),
+            pending_gets: Arc::new(Mutex::new(HashMap::new())),
             control,
         }
     }
@@ -170,43 +180,14 @@ impl Client {
         peer_id: PeerId,
         chunk_id: CID,
     ) -> Result<(), P2PNetworkError> {
-        let mut action_sender_dup = self.action_sender.clone();
-        let (sender, receiver) = oneshot::channel();
-        let data = serde_json::to_vec(&GetChunkReq {
-            chunk_id,
-            peer_id: self.local_peer_id.to_bytes(),
-        })?;
-        let msg = PeerRequest(PeerRequestMessage {
-            id: random_req_id(),
-            command: GET_CHUNK_CMD.to_string(),
-            data,
-        });
-        action_sender_dup
-            .send(Action::SendRequest {
-                peer_id: peer_id.to_owned(),
-                msg: msg.clone(),
-                sender,
-            })
-            .await
-            .unwrap();
-        receiver.await.unwrap()?;
-        Ok(())
-    }
-
-    // Send chunk data to a peer
-    pub async fn send_chunk(
-        &self,
-        peer_id: PeerId,
-        chunk: Vec<u8>,
-    ) -> Result<(), P2PNetworkError> {
-        let mut pending_sends = self.pending_sends.lock().await;
+        let mut pending_gets = self.pending_gets.lock().await;
         let (done_sender, done_recv) = oneshot::channel();
-        match pending_sends.entry(peer_id.clone()) {
+        match pending_gets.entry(peer_id.clone()) {
             Entry::Occupied(o) => {
                 let sender = o.into_mut();
                 sender
-                    .send(SendChunkTask {
-                        chunk,
+                    .send(GetChunkTask {
+                        chunk_id,
                         peer_id,
                         done_sender,
                     })
@@ -215,26 +196,25 @@ impl Client {
             },
             Entry::Vacant(v) => {
                 let (mut sender, mut recv) =
-                    mpsc::channel::<SendChunkTask>(MAX_PENDING_SEND_PER_PEER);
-                let control = self.control.clone();
+                    mpsc::channel::<GetChunkTask>(MAX_PENDING_GET_PER_PEER);
                 let action_sender = self.action_sender.clone();
+                let local_peer_id = self.local_peer_id.clone();
                 tokio::spawn(async move {
                     while let Some(task) = recv.next().await {
-                        let control = control.clone();
                         let action_sender = action_sender.clone();
-                        handle_send_chunk(
-                            control,
+                        handle_get_chunk(
+                            local_peer_id,
                             action_sender,
                             task.peer_id,
-                            task.chunk,
+                            task.chunk_id,
                             task.done_sender,
                         )
                         .await;
                     }
                 });
                 sender
-                    .send(SendChunkTask {
-                        chunk,
+                    .send(GetChunkTask {
+                        chunk_id,
                         peer_id,
                         done_sender,
                     })
@@ -242,6 +222,74 @@ impl Client {
                     .unwrap();
                 v.insert(sender);
             },
+        }
+        done_recv.await.unwrap()
+    }
+
+    // Send chunk data to a peer
+    pub async fn send_chunk(
+        &self,
+        peer_id: PeerId,
+        chunk: Vec<u8>,
+    ) -> Result<(), P2PNetworkError> {
+        let (done_sender, done_recv) = oneshot::channel();
+        {
+            let mut pending_sends = self.pending_sends.lock().await;
+            match pending_sends.entry(peer_id.clone()) {
+                Entry::Occupied(o) => {
+                    let sender = o.into_mut();
+                    sender
+                        .send(SendChunkTask {
+                            chunk,
+                            peer_id,
+                            done_sender,
+                        })
+                        .await
+                        .unwrap();
+                },
+                Entry::Vacant(v) => {
+                    let (mut sender, mut recv) = mpsc::channel::<SendChunkTask>(
+                        MAX_PENDING_SEND_PER_PEER,
+                    );
+                    let control = self.control.clone();
+                    let action_sender = self.action_sender.clone();
+                    tokio::spawn(async move {
+                        while let Some(task) = recv.next().await {
+                            let control = control.clone();
+                            let action_sender = action_sender.clone();
+                            let cid = cid(&task.chunk);
+                            debug!(
+                                "handle sending {} to {}",
+                                cid.0.clone(),
+                                peer_id.to_string()
+                            );
+                            handle_send_chunk(
+                                control,
+                                action_sender,
+                                task.peer_id,
+                                task.chunk,
+                                task.done_sender,
+                            )
+                            .await;
+                            debug!(
+                                "done handle sending {} to {}",
+                                cid.0.clone(),
+                                peer_id.to_string()
+                            );
+                        }
+                    });
+                    sender
+                        .send(SendChunkTask {
+                            chunk,
+                            peer_id,
+                            done_sender,
+                        })
+                        .await
+                        .unwrap();
+                    v.insert(sender);
+                },
+            }
+            drop(pending_sends);
         }
         done_recv.await.unwrap()
     }
@@ -466,6 +514,44 @@ impl Client {
     }
 }
 
+async fn handle_get_chunk(
+    local_peer_id: PeerId,
+    action_sender: mpsc::Sender<Action>,
+    peer_id: PeerId,
+    chunk_id: CID,
+    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
+) {
+    let mut action_sender_dup = action_sender.clone();
+    let (sender, receiver) = oneshot::channel();
+    let data = match serde_json::to_vec(&GetChunkReq {
+        chunk_id,
+        peer_id: local_peer_id.to_bytes(),
+    }) {
+        Ok(data) => data,
+        Err(e) => {
+            done_sender.send(Err(e.into())).unwrap();
+            return;
+        },
+    };
+    let msg = PeerRequest(PeerRequestMessage {
+        id: random_req_id(),
+        command: GET_CHUNK_CMD.to_string(),
+        data,
+    });
+    action_sender_dup
+        .send(Action::SendRequest {
+            peer_id: peer_id.to_owned(),
+            msg: msg.clone(),
+            sender,
+        })
+        .await
+        .unwrap();
+    let _ = match receiver.await.unwrap() {
+        Ok(_) => done_sender.send(Ok(())),
+        Err(e) => done_sender.send(Err(e)),
+    };
+}
+
 async fn handle_send_chunk(
     control: Control,
     action_sender: mpsc::Sender<Action>,
@@ -488,12 +574,6 @@ async fn handle_send_chunk(
         data,
     });
 
-    debug!(
-        "handle sending {} to {}",
-        cid.0.clone(),
-        peer_id.to_string()
-    );
-
     action_sender_dup
         .send(Action::SendRequest {
             peer_id: peer_id.to_owned(),
@@ -512,13 +592,13 @@ async fn handle_send_chunk(
         }) {
         Ok(stream) => stream,
         Err(e) => {
-            done_sender.send(Err(e));
+            done_sender.send(Err(e)).unwrap();
             return;
         },
     };
     stream.write_all(&chunk).await.unwrap();
     stream.close().await.unwrap();
-    match receiver.await.unwrap() {
+    let _ = match receiver.await.unwrap() {
         Ok(_) => done_sender.send(Ok(())),
         Err(e) => done_sender.send(Err(e)),
     };

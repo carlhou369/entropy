@@ -1,12 +1,13 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
     io::{Read, Write},
+    sync::Arc,
 };
 
 use actix_web::web::{self, Query};
 use libp2p::PeerId;
 use log::{error, info};
-use tokio::task::JoinSet;
+use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
     cid,
@@ -30,6 +31,8 @@ use {
     tokio::sync::Mutex,
 };
 
+const MAX_OUTBOUND_STREAM: usize = 10;
+
 #[derive(Debug, Clone)]
 struct ContentMeta {
     pub chunk_meta: HashMap<u32, HashMap<u32, (CID, Vec<PeerId>)>>,
@@ -44,6 +47,7 @@ struct PeerState {
     pub content_log: Mutex<HashMap<CID, ContentMeta>>,
     pub codec: WirehairCodec,
     pub p2p_client: Client,
+    pub stream_sema: Arc<Semaphore>,
 }
 
 impl PeerState {
@@ -59,6 +63,7 @@ impl PeerState {
             content_log: Mutex::new(HashMap::new()),
             codec,
             p2p_client,
+            stream_sema: Arc::new(Semaphore::new(MAX_OUTBOUND_STREAM)),
         }
     }
 }
@@ -105,14 +110,23 @@ async fn put(
             for peer in closest.clone().into_iter() {
                 let client = data.p2p_client.clone();
                 let fragment_clone = fragment.clone();
+                let sema = data.stream_sema.clone();
                 set.spawn(async move {
+                    let permit = sema.acquire().await.unwrap();
                     let fragment_cid = cid(&fragment_clone);
                     info!(
                         "sending light node {} fragment {}",
                         peer.to_string(),
                         fragment_cid.0
                     );
-                    client.send_chunk(peer, fragment_clone).await
+                    let res = client.send_chunk(peer, fragment_clone).await;
+                    info!(
+                        "done sent light node {} fragment {}",
+                        peer.to_string(),
+                        fragment_cid.0
+                    );
+                    drop(permit);
+                    res
                 });
             }
 
