@@ -36,8 +36,8 @@ const GET_CHUNK_CMD: &str = "chunk_get";
 const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
 
-const MAX_PENDING_SEND_PER_PEER: usize = 3;
-const MAX_PENDING_GET_PER_PEER: usize = 1;
+const MAX_PENDING_SEND_PER_PEER: usize = 10;
+const MAX_PENDING_GET_PER_PEER: usize = 10;
 
 pub enum PeerCommand {
     PushChunkAck,

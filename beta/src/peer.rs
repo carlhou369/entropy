@@ -1,7 +1,8 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
-    io::{Read, Write},
+    io::{self, Read, Write},
     sync::Arc,
+    time::Duration,
 };
 
 use actix_web::web::{self, Query};
@@ -12,7 +13,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     cid,
     codec::wirehair_codec::{WirehairCodec, WirehairCodecOptions},
-    p2p::client::Client,
+    p2p::{client::Client, error::P2PNetworkError},
     CID,
 };
 
@@ -31,9 +32,9 @@ use {
     tokio::sync::Mutex,
 };
 
-const MAX_OUTBOUND_STREAM: usize = 10;
+const MAX_OUTBOUND_STREAM: usize = 30;
 
-const MAX_INBOUND_STREAM: usize = 3;
+const MAX_INBOUND_STREAM: usize = 30;
 
 #[derive(Debug, Clone)]
 struct ContentMeta {
@@ -185,6 +186,9 @@ async fn get(
             let client = data.p2p_client.clone();
             let sema = data.inbound_stream_sema.clone();
             set.spawn(async move {
+                if let Ok(_) = read_local_content(fragment_cid.clone()) {
+                    return Ok((chunk_id, fragment_id, fragment_cid.clone()));
+                };
                 let permit = sema.acquire().await.unwrap();
                 for light_peer in light_peers.into_iter() {
                     debug!(
@@ -203,6 +207,7 @@ async fn get(
                                 light_peer.clone()
                             );
                             drop(permit);
+                            tokio::time::sleep(Duration::from_millis(3)).await;
                             return Ok((
                                 chunk_id,
                                 fragment_id,
@@ -226,6 +231,7 @@ async fn get(
                     };
                 }
                 drop(permit);
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 Err((chunk_id, fragment_id, fragment_cid.clone()))
             });
         }
@@ -234,22 +240,14 @@ async fn get(
     while let Some(res) = set.join_next().await {
         let res = res.unwrap();
         let (chunk_id, fragment_id, fragment_cid) = res.unwrap_or_else(|x| x);
-        let mut file = match std::fs::File::open(fragment_cid.0.clone()) {
-            Ok(file) => file,
+        let buf = match read_local_content(fragment_cid.clone()) {
+            Ok(buf) => buf,
             Err(e) => {
-                error!("open file {:?}", e);
+                error!("read local fragment content error {}", e);
                 continue;
             },
         };
-        let mut buf = Vec::new();
-        if let Err(e) = file.read_to_end(&mut buf) {
-            error!("read file {:?}", e);
-            continue;
-        }
-        if super::cid(&buf).0 != fragment_cid.0.clone() {
-            error!("fragment content inconsistent {}", fragment_cid.0.clone());
-            continue;
-        }
+        debug!("insert fragment {}", fragment_cid.0.clone());
         match links.entry(chunk_id) {
             Entry::Occupied(o) => {
                 let o = o.into_mut();
@@ -355,4 +353,27 @@ impl FullNodeService {
         .run()
         .await;
     }
+}
+
+fn read_local_content(fragment_cid: CID) -> Result<Vec<u8>, P2PNetworkError> {
+    let mut file = match std::fs::File::open(fragment_cid.0.clone()) {
+        Ok(file) => file,
+        Err(e) => {
+            error!("open file {} error {:?}", e, fragment_cid.0.clone());
+            return Err(e.into());
+        },
+    };
+    let mut buf = Vec::new();
+    if let Err(e) = file.read_to_end(&mut buf) {
+        error!("read file {} error {:?}", fragment_cid.0.clone(), e);
+        return Err(e.into());
+    }
+    if super::cid(&buf).0 != fragment_cid.0.clone() {
+        error!("fragment content inconsistent {}", fragment_cid.0.clone());
+        return Err(P2PNetworkError::Other(format!(
+            "fragment content inconsistent {}",
+            fragment_cid.0.clone()
+        )));
+    }
+    Ok(buf)
 }
