@@ -51,7 +51,7 @@ pub struct Behaviour {
     #[cfg(feature = "gossipsub")]
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
-    ping: ping::Behaviour,
+    // ping: ping::Behaviour,
     stream: libp2p_stream::Behaviour,
 }
 
@@ -136,7 +136,8 @@ impl Network {
         };
         let peer_id = id_keys.public().to_peer_id();
         let mut yamux_config = yamux::Config::default();
-        yamux_config.set_max_num_streams(1000);
+        yamux_config.set_max_num_streams(10000);
+        yamux_config.set_max_buffer_size(1024 * 1024 * 100);
 
         let mut plex_config = libp2p_mplex::MplexConfig::default();
         plex_config.set_split_send_size(1024 * 10);
@@ -184,11 +185,11 @@ impl Network {
                         "/entropy/0.1.0".into(),
                         key.public(),
                     )),
-                    ping: ping::Behaviour::new(
-                        ping::Config::new()
-                            .with_interval(Duration::from_secs(1))
-                            .with_timeout(Duration::from_secs(3)),
-                    ),
+                    // ping: ping::Behaviour::new(
+                    //     ping::Config::new()
+                    //         .with_interval(Duration::from_secs(1))
+                    //         .with_timeout(Duration::from_secs(3)),
+                    // ),
                     stream: libp2p_stream::Behaviour::new(),
                 })
             })
@@ -236,16 +237,39 @@ impl Network {
         let mut control = self.swarm.behaviour().stream.new_control();
         let mut incomming_stream =
             control.accept(Self::stream_protocol()).unwrap();
+
+        //handle stream
+        let event_sender = self.event_sender.clone();
+        tokio::spawn(async move {
+            while let Some((peer, stream)) = incomming_stream.next().await {
+                let event_sender = event_sender.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        Self::handle_stream(peer, stream, event_sender).await
+                    {
+                        error!("handle stream from peer {} error {}", peer, e);
+                    };
+                });
+            }
+        });
+
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_event(event).await,
                 action = self.action_receiver.next() => match action {
                     Some(c) => self.handle_action(c).await,
-                    None=>  return,
+                    None=> {},
                 },
-                Some((peer,stream)) = incomming_stream.next() => {
-                        self.handle_stream(peer,stream).await.unwrap();
-                },
+                // Some((peer,stream)) = incomming_stream.next() => {
+                //     let event_sender  = self.event_sender.clone();
+                //     tokio::spawn(
+                //         async move {
+                //             if let Err(e) = Self::handle_stream(peer,stream,event_sender).await{
+                //                 error!("handle stream from peer {} error {}",peer,e);
+                //             };
+                //         }
+                //     );
+                // },
                 _ = inter.tick() => {
                     self.list_peers();
                 }
@@ -255,10 +279,11 @@ impl Network {
 
     // Handle chunk data sent from another peer, saved as file with data hash as filename.
     async fn handle_stream(
-        &mut self,
         peer_id: PeerId,
         mut stream: Stream,
+        mut event_sender: mpsc::Sender<Event>,
     ) -> Result<(), P2PNetworkError> {
+        debug!("start handle stream from {}", peer_id);
         let mut temp_file = NamedTempFile::new().unwrap();
         let mut buffer = [0u8; 1024 * 8];
         let mut hasher = blake3::Hasher::new();
@@ -272,7 +297,7 @@ impl Network {
                     temp_file.write_all(&buffer[..bytes_read]).unwrap();
                 },
                 Err(e) => {
-                    error!("handle stream {e:?}");
+                    error!("handle stream error {e:?}");
                     break;
                 },
             }
@@ -280,18 +305,20 @@ impl Network {
         let hash = hasher.finalize();
 
         temp_file.persist(hash.to_string())?;
-        stream.write_all(b"hello").await?;
-        self.event_sender
+        debug!("done handle stream from {}", peer_id);
+        event_sender
             .send(Event::ChunkReceived {
                 peer_id,
                 chunk_id: CID(hash.to_string()),
             })
             .await
             .unwrap();
+        debug!("sent ChunkReceived event");
         Ok(())
     }
 
     async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
+        debug!("handle event");
         match event {
             SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
@@ -314,6 +341,7 @@ impl Network {
                     ..
                 },
             )) => {
+                debug!("handle event 1");
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     let _ = sender.send(Ok(peers.clone()));
                     debug!("get peers progress {peers:?}");
@@ -332,6 +360,7 @@ impl Network {
                     ..
                 },
             )) => {
+                debug!("handle event 2");
                 if let Some(sender) = self.pending_get_peers.remove(&id) {
                     debug!("get closest peers error {e}");
                     if step.last {
@@ -351,6 +380,7 @@ impl Network {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
+                    debug!("handle event 3");
                     let data = request.0.data.clone();
                     if request.0.command == *"multiaddress" {
                         if let Ok(remote_address) = Multiaddr::from_str(
@@ -386,6 +416,7 @@ impl Network {
                     request_id,
                     response,
                 } => {
+                    debug!("handle event 4");
                     let _ = self
                         .pending_request
                         .remove(&request_id)
@@ -400,6 +431,7 @@ impl Network {
                     ..
                 },
             )) => {
+                debug!("handle event 5");
                 error!("send request failure error {error}");
                 let _ = self
                     .pending_request
@@ -411,6 +443,7 @@ impl Network {
                 request_response::Event::ResponseSent { .. },
             )) => {},
             SwarmEvent::NewListenAddr { address, .. } => {
+                debug!("handle event 6");
                 let local_peer_id = *self.swarm.local_peer_id();
                 info!(
                     "Local node is listening on {:?}",
@@ -426,6 +459,7 @@ impl Network {
             } => {
                 match endpoint {
                     ConnectedPoint::Dialer { address, .. } => {
+                        debug!("handle event 7");
                         if let Some(sender) = self.pending_dial.remove(&peer_id)
                         {
                             let _ = sender.send(Ok(()));
@@ -437,6 +471,7 @@ impl Network {
                         debug!("connection dialer address {address}");
                     },
                     ConnectedPoint::Listener { send_back_addr, .. } => {
+                        debug!("handle event 8");
                         self.event_sender
                             .send(Event::IncomeConnection {
                                 peer_id,
@@ -456,6 +491,7 @@ impl Network {
                 endpoint: _,
                 cause,
             } => {
+                debug!("handle event 9");
                 self.event_sender
                     .send(Event::ConnectionClosed {
                         peer_id,
@@ -466,6 +502,7 @@ impl Network {
                 debug!("connection closed {peer_id}, cause {cause:?}");
             },
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                debug!("handle event 10");
                 if let Some(peer_id) = peer_id {
                     if let Some(sender) = self.pending_dial.remove(&peer_id) {
                         let _ =
@@ -483,12 +520,15 @@ impl Network {
     }
 
     async fn handle_action(&mut self, command: Action) {
+        debug!("handle action");
         match command {
             Action::Bootstrap {} => {
+                debug!("handle action Bootstrap");
                 let _ =
                     self.swarm.behaviour_mut().kademlia.bootstrap().unwrap();
             },
             Action::GetPeers { key, sender } => {
+                debug!("handle action GetPeers");
                 let query_id =
                     self.swarm.behaviour_mut().kademlia.get_closest_peers(key);
                 self.pending_get_peers.insert(query_id, sender);
@@ -498,6 +538,7 @@ impl Network {
                 peer_addr,
                 sender,
             } => {
+                debug!("handle action Dial");
                 if let hash_map::Entry::Vacant(e) =
                     self.pending_dial.entry(peer_id)
                 {
@@ -528,6 +569,8 @@ impl Network {
                 msg,
                 sender,
             } => {
+                debug!("handle action SendRequest");
+                debug!("send request cmd {}", msg.0.command.clone());
                 let req_id = self
                     .swarm
                     .behaviour_mut()
@@ -536,11 +579,23 @@ impl Network {
                 self.pending_request.insert(req_id, sender);
             },
             Action::SendResponse { response, channel } => {
-                self.swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, response)
-                    .unwrap();
+                debug!("handle action SendResponse");
+                debug!("send response cmd {}", response.0.command.clone());
+                if channel.is_open() {
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, response.clone())
+                    {
+                        error!(
+                            "send response error cmd {} error {:?}",
+                            response.0.command, e,
+                        );
+                    }
+                } else {
+                    debug!("channel closed");
+                }
             },
         }
     }

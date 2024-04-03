@@ -367,9 +367,7 @@ impl Client {
                                     },
                                 };
                             info!("chunk id {}", chunk_id.0.clone());
-                            if let Some(ChunkState::Saved(_chunk_id)) =
-                                pendind_chunks.remove(&chunk_id)
-                            {
+                            if pendind_chunks.contains_key(&chunk_id) {
                                 action_sender_dup
                                     .send(Action::SendResponse {
                                         response: PeerResponse(
@@ -384,7 +382,7 @@ impl Client {
                                     })
                                     .await
                                     .unwrap();
-                            } else if !pendind_chunks.contains_key(&chunk_id) {
+                            } else {
                                 pendind_chunks.insert(
                                     chunk_id.clone(),
                                     ChunkState::WaitToReceive((
@@ -436,26 +434,27 @@ impl Client {
                                 continue;
                             }
                             //send
-                            if let Err(e) =
-                                self.send_chunk(peer_id, chunk).await
-                            {
-                                error!("send chunk error {e}");
-                            } else {
-                                action_sender_dup
-                                    .send(Action::SendResponse {
-                                        response: PeerResponse(
-                                            PeerResponseMessage {
-                                                id: request.0.id,
-                                                command: GET_CHUNK_ACK_CMD
-                                                    .to_string(),
-                                                data: b"ack".to_vec(),
-                                            },
-                                        ),
-                                        channel,
-                                    })
-                                    .await
-                                    .unwrap();
-                            };
+                            let control = self.control.clone();
+                            let action_sender = self.action_sender.clone();
+                            let (done_sender, done_recv) = oneshot::channel();
+                            tokio::spawn(async move {
+                                handle_send_chunk(
+                                    control,
+                                    action_sender,
+                                    peer_id,
+                                    chunk,
+                                    done_sender,
+                                )
+                                .await;
+                                if let Err(e) = done_recv.await.unwrap() {
+                                    error!(
+                                        "handle send chunk {} to {} error {}",
+                                        req.chunk_id.0.clone(),
+                                        peer_id,
+                                        e
+                                    );
+                                };
+                            });
                         },
                         PeerCommand::Other => {
                             info!("Other req");
@@ -479,31 +478,61 @@ impl Client {
                     peer_id: _,
                     chunk_id,
                 } => {
+                    debug!("handle ChunkReceived event");
                     let mut pendind_chunks = self.pending_chunks.lock().await;
-                    if let Some(ChunkState::WaitToReceive((
-                        _chunk_id,
-                        channel,
-                        req_id,
-                        ..,
-                    ))) = pendind_chunks.remove(&chunk_id)
-                    {
-                        action_sender_dup
-                            .send(Action::SendResponse {
-                                response: PeerResponse(PeerResponseMessage {
-                                    id: req_id,
-                                    command: PUSH_CHUNK_ACK_CMD.to_string(),
-                                    data: b"ack".to_vec(),
-                                }),
-                                channel,
-                            })
-                            .await
-                            .unwrap();
-                    } else {
-                        pendind_chunks.insert(
-                            chunk_id.clone(),
-                            ChunkState::Saved(chunk_id),
-                        );
-                    }
+                    debug!("get pending_chunks lock");
+                    match pendind_chunks.remove(&chunk_id) {
+                        Some(ChunkState::WaitToReceive((
+                            _chunk_id,
+                            channel,
+                            req_id,
+                            ..,
+                        ))) => {
+                            action_sender_dup
+                                .send(Action::SendResponse {
+                                    response: PeerResponse(
+                                        PeerResponseMessage {
+                                            id: req_id,
+                                            command: PUSH_CHUNK_ACK_CMD
+                                                .to_string(),
+                                            data: b"ack".to_vec(),
+                                        },
+                                    ),
+                                    channel,
+                                })
+                                .await
+                                .unwrap();
+                        },
+                        Some(ChunkState::Saved(_)) => {},
+                        None => {},
+                    };
+                    pendind_chunks
+                        .insert(chunk_id.clone(), ChunkState::Saved(chunk_id));
+
+                    // if let Some(ChunkState::WaitToReceive((
+                    //     _chunk_id,
+                    //     channel,
+                    //     req_id,
+                    //     ..,
+                    // ))) = pendind_chunks.remove(&chunk_id)
+                    // {
+                    //     action_sender_dup
+                    //         .send(Action::SendResponse {
+                    //             response: PeerResponse(PeerResponseMessage {
+                    //                 id: req_id,
+                    //                 command: PUSH_CHUNK_ACK_CMD.to_string(),
+                    //                 data: b"ack".to_vec(),
+                    //             }),
+                    //             channel,
+                    //         })
+                    //         .await
+                    //         .unwrap();
+                    // } else {
+                    //     pendind_chunks.insert(
+                    //         chunk_id.clone(),
+                    //         ChunkState::Saved(chunk_id),
+                    //     );
+                    // }
                 },
                 Event::IncomeConnection {
                     peer_id,
@@ -609,8 +638,10 @@ async fn handle_send_chunk(
             return;
         },
     };
+    debug!("handle send chunk open stream to {}", peer_id);
     stream.write_all(&chunk).await.unwrap();
     stream.close().await.unwrap();
+    debug!("handle send chunk close stream to {}", peer_id);
     let _ = match receiver.await.unwrap() {
         Ok(_) => done_sender.send(Ok(())),
         Err(e) => done_sender.send(Err(e)),

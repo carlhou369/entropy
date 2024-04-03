@@ -33,7 +33,7 @@ use {
 
 const MAX_OUTBOUND_STREAM: usize = 10;
 
-const MAX_INBOUND_STREAM: usize = 1;
+const MAX_INBOUND_STREAM: usize = 3;
 
 #[derive(Debug, Clone)]
 struct ContentMeta {
@@ -106,9 +106,10 @@ async fn put(
         for (fragment_id, fragment) in chunk.into_iter() {
             let fragment_cid = cid(&fragment);
             // save local copy
-            let mut file = fs::File::create(fragment_cid.clone().0).unwrap();
-            file.write_all(&fragment).unwrap();
-            file.flush().unwrap();
+            // todo: save local
+            // let mut file = fs::File::create(fragment_cid.clone().0).unwrap();
+            // file.write_all(&fragment).unwrap();
+            // file.flush().unwrap();
 
             // send fragment to random selected closest peer
             let closest = data
@@ -232,46 +233,82 @@ async fn get(
 
     while let Some(res) = set.join_next().await {
         let res = res.unwrap();
-        match res {
-            Ok((chunk_id, fragment_id, fragment_cid)) => {
-                // let resp_error =
-                //     HttpResponse::InternalServerError().body(format!(
-                //         "content {} chunk {} fragment {} not found",
-                //         cid.0, chunk_id, fragment_id
-                //     ));
-                let mut file = match std::fs::File::open(fragment_cid.0.clone())
-                {
-                    Ok(file) => file,
-                    Err(e) => {
-                        error!("open file {:?}", e);
-                        continue;
-                    },
-                };
-                let mut buf = Vec::new();
-                if let Err(e) = file.read_to_end(&mut buf) {
-                    error!("read file {:?}", e);
-                    continue;
-                }
-                match links.entry(chunk_id) {
-                    Entry::Occupied(o) => {
-                        let o = o.into_mut();
-                        o.insert(fragment_id, buf);
-                    },
-                    Entry::Vacant(v) => {
-                        let mut chunk_links: HashMap<u32, Vec<u8>> =
-                            HashMap::new();
-                        chunk_links.insert(fragment_id, buf);
-                        v.insert(chunk_links);
-                    },
-                }
+        let (chunk_id, fragment_id, fragment_cid) = res.unwrap_or_else(|x| x);
+        let mut file = match std::fs::File::open(fragment_cid.0.clone()) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("open file {:?}", e);
+                continue;
             },
-            Err((chunk_id, fragment_id, _fragment_cid)) => {
-                return HttpResponse::InternalServerError().body(format!(
-                    "content {} chunk {} fragment {} not found",
-                    cid.0, chunk_id, fragment_id
-                ));
+        };
+        let mut buf = Vec::new();
+        if let Err(e) = file.read_to_end(&mut buf) {
+            error!("read file {:?}", e);
+            continue;
+        }
+        if super::cid(&buf).0 != fragment_cid.0.clone() {
+            error!("fragment content inconsistent {}", fragment_cid.0.clone());
+            continue;
+        }
+        match links.entry(chunk_id) {
+            Entry::Occupied(o) => {
+                let o = o.into_mut();
+                o.insert(fragment_id, buf);
+            },
+            Entry::Vacant(v) => {
+                let mut chunk_links: HashMap<u32, Vec<u8>> = HashMap::new();
+                chunk_links.insert(fragment_id, buf);
+                v.insert(chunk_links);
             },
         }
+
+        // match res {
+        //     Ok((chunk_id, fragment_id, fragment_cid)) => {
+        //         let mut file = match std::fs::File::open(fragment_cid.0.clone())
+        //         {
+        //             Ok(file) => file,
+        //             Err(e) => {
+        //                 error!("open file {:?}", e);
+        //                 continue;
+        //             },
+        //         };
+        //         let mut buf = Vec::new();
+        //         if let Err(e) = file.read_to_end(&mut buf) {
+        //             error!("read file {:?}", e);
+        //             continue;
+        //         }
+        //         if super::cid(&buf).0 != fragment_cid.0.clone() {
+        //             error!(
+        //                 "fragment content inconsistent {}",
+        //                 fragment_cid.0.clone()
+        //             );
+        //             continue;
+        //         }
+        //         match links.entry(chunk_id) {
+        //             Entry::Occupied(o) => {
+        //                 let o = o.into_mut();
+        //                 o.insert(fragment_id, buf);
+        //             },
+        //             Entry::Vacant(v) => {
+        //                 let mut chunk_links: HashMap<u32, Vec<u8>> =
+        //                     HashMap::new();
+        //                 chunk_links.insert(fragment_id, buf);
+        //                 v.insert(chunk_links);
+        //             },
+        //         }
+        //     },
+        //     Err((chunk_id, fragment_id, _fragment_cid)) => {
+        //         // return HttpResponse::InternalServerError().body(format!(
+        //         //     "content {} chunk {} fragment {} not found",
+        //         //     cid.0, chunk_id, fragment_id
+        //         // ));
+        //         error!(
+        //             "content {} chunk {} fragment {} not found",
+        //             cid.0, chunk_id, fragment_id
+        //         );
+        //         continue;
+        //     },
+        // }
     }
 
     let object = data.codec.decode(links, object_size);
