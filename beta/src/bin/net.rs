@@ -87,8 +87,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     keystore.save_to(path).unwrap();
 
     // Demo p2p
-    let (action_sender, action_receiver) = mpsc::channel(10000);
-    let (event_sender, event_receiver) = mpsc::channel(10000);
+    let (action_sender, action_receiver) = mpsc::channel(100);
+    let (event_sender, event_receiver) = mpsc::channel(100);
 
     // New p2p Network
     let network =

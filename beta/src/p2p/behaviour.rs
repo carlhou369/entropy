@@ -136,12 +136,8 @@ impl Network {
         };
         let peer_id = id_keys.public().to_peer_id();
         let mut yamux_config = yamux::Config::default();
-        yamux_config.set_max_num_streams(10000);
-        yamux_config.set_max_buffer_size(1024 * 1024 * 100);
-
-        let mut plex_config = libp2p_mplex::MplexConfig::default();
-        plex_config.set_split_send_size(1024 * 10);
-        plex_config.set_max_num_streams(1000);
+        yamux_config.set_max_num_streams(1000);
+        // yamux_config.set_max_buffer_size(1024 * 1024 * 100);
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
@@ -187,15 +183,15 @@ impl Network {
                     )),
                     // ping: ping::Behaviour::new(
                     //     ping::Config::new()
-                    //         .with_interval(Duration::from_secs(1))
-                    //         .with_timeout(Duration::from_secs(3)),
+                    //         .with_interval(Duration::from_secs(5))
+                    //         .with_timeout(Duration::from_secs(10)),
                     // ),
                     stream: libp2p_stream::Behaviour::new(),
                 })
             })
             .map_err(|e| P2PNetworkError::NewBehaviourError(format!("{e}")))?
             .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(Duration::from_secs(60))
+                c.with_idle_connection_timeout(Duration::from_secs(600))
             })
             .build();
 
@@ -260,16 +256,6 @@ impl Network {
                     Some(c) => self.handle_action(c).await,
                     None=> {},
                 },
-                // Some((peer,stream)) = incomming_stream.next() => {
-                //     let event_sender  = self.event_sender.clone();
-                //     tokio::spawn(
-                //         async move {
-                //             if let Err(e) = Self::handle_stream(peer,stream,event_sender).await{
-                //                 error!("handle stream from peer {} error {}",peer,e);
-                //             };
-                //         }
-                //     );
-                // },
                 _ = inter.tick() => {
                     self.list_peers();
                 }
@@ -404,24 +390,33 @@ impl Network {
                             }
                         }
                     }
-                    self.event_sender
-                        .send(Event::InboundRequest {
-                            request: PeerRequest(request.0),
-                            channel,
-                        })
-                        .await
-                        .expect("Event receiver not to be dropped.");
+                    let mut event_sender = self.event_sender.clone();
+                    tokio::spawn(async move {
+                        event_sender
+                            .send(Event::InboundRequest {
+                                request: PeerRequest(request.0),
+                                channel,
+                            })
+                            .await
+                            .expect("Event receiver not to be dropped.");
+                    });
                 },
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
                     debug!("handle event 4");
+                    debug!(
+                        "handle reponse cmd {} requestID {}",
+                        response.0.command.clone(),
+                        response.0.id.clone()
+                    );
                     let _ = self
                         .pending_request
                         .remove(&request_id)
                         .expect("Request to still be pending.")
-                        .send(Ok(response));
+                        .send(Ok(response))
+                        .unwrap();
                 },
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
@@ -472,14 +467,17 @@ impl Network {
                     },
                     ConnectedPoint::Listener { send_back_addr, .. } => {
                         debug!("handle event 8");
-                        self.event_sender
-                            .send(Event::IncomeConnection {
-                                peer_id,
-                                connection_id,
-                            })
-                            .await
-                            .expect("Event receiver not to be dropped.");
-                        debug!("connection listener send back address {send_back_addr}");
+                        let mut event_sender = self.event_sender.clone();
+                        tokio::spawn(async move {
+                            event_sender
+                                .send(Event::IncomeConnection {
+                                    peer_id,
+                                    connection_id,
+                                })
+                                .await
+                                .expect("Event receiver not to be dropped.");
+                            debug!("connection listener send back address {send_back_addr}");
+                        });
                     },
                 }
                 debug!("connected to {peer_id}");
@@ -492,14 +490,17 @@ impl Network {
                 cause,
             } => {
                 debug!("handle event 9");
-                self.event_sender
-                    .send(Event::ConnectionClosed {
-                        peer_id,
-                        connection_id,
-                    })
-                    .await
-                    .expect("Event receiver not to be dropped.");
-                debug!("connection closed {peer_id}, cause {cause:?}");
+                let mut event_sender = self.event_sender.clone();
+                tokio::spawn(async move {
+                    event_sender
+                        .send(Event::ConnectionClosed {
+                            peer_id,
+                            connection_id,
+                        })
+                        .await
+                        .expect("Event receiver not to be dropped.");
+                    debug!("connection closed {peer_id}, cause {cause:?}");
+                });
             },
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 debug!("handle event 10");
@@ -570,7 +571,11 @@ impl Network {
                 sender,
             } => {
                 debug!("handle action SendRequest");
-                debug!("send request cmd {}", msg.0.command.clone());
+                debug!(
+                    "send request cmd {} requestID {}",
+                    msg.0.command.clone(),
+                    msg.0.id.clone()
+                );
                 let req_id = self
                     .swarm
                     .behaviour_mut()
@@ -613,7 +618,7 @@ impl Network {
         for bucket in self.swarm.behaviour_mut().kademlia.kbuckets() {
             if bucket.num_entries() > 0 {
                 for item in bucket.iter() {
-                    debug!("Peer ID: {:?}", item.node.key);
+                    // debug!("Peer ID: {:?}", item.node.key);
                 }
             }
         }

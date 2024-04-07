@@ -4,6 +4,7 @@ use std::{
     fmt::Debug,
     io::Read,
     sync::Arc,
+    time::Duration,
 };
 
 use crate::{
@@ -37,7 +38,7 @@ const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
 
 const MAX_PENDING_SEND_PER_PEER: usize = 10;
-const MAX_PENDING_GET_PER_PEER: usize = 10;
+const MAX_PENDING_GET_PER_PEER: usize = 1;
 
 pub enum PeerCommand {
     PushChunkAck,
@@ -438,6 +439,8 @@ impl Client {
                             let action_sender = self.action_sender.clone();
                             let (done_sender, done_recv) = oneshot::channel();
                             tokio::spawn(async move {
+                                let mut action_sender_dup =
+                                    action_sender.clone();
                                 handle_send_chunk(
                                     control,
                                     action_sender,
@@ -454,6 +457,21 @@ impl Client {
                                         e
                                     );
                                 };
+                                //todo: handle error
+                                action_sender_dup
+                                    .send(Action::SendResponse {
+                                        response: PeerResponse(
+                                            PeerResponseMessage {
+                                                id: request.0.id,
+                                                command: GET_CHUNK_ACK_CMD
+                                                    .to_string(),
+                                                data: b"ack".to_vec(),
+                                            },
+                                        ),
+                                        channel,
+                                    })
+                                    .await
+                                    .unwrap();
                             });
                         },
                         PeerCommand::Other => {
@@ -625,6 +643,7 @@ async fn handle_send_chunk(
         .await
         .unwrap();
 
+    
     let mut stream = match control
         .open_stream(peer_id.to_owned(), Network::stream_protocol())
         .await
@@ -639,7 +658,9 @@ async fn handle_send_chunk(
         },
     };
     debug!("handle send chunk open stream to {}", peer_id);
-    stream.write_all(&chunk).await.unwrap();
+    if let Err(e) = stream.write_all(&chunk).await {
+        error!("write to stream error {}", e);
+    };
     stream.close().await.unwrap();
     debug!("handle send chunk close stream to {}", peer_id);
     let _ = match receiver.await.unwrap() {

@@ -34,7 +34,7 @@ use {
 
 const MAX_OUTBOUND_STREAM: usize = 30;
 
-const MAX_INBOUND_STREAM: usize = 30;
+const MAX_INBOUND_STREAM: usize = 3;
 
 #[derive(Debug, Clone)]
 struct ContentMeta {
@@ -239,6 +239,7 @@ async fn get(
 
     while let Some(res) = set.join_next().await {
         let res = res.unwrap();
+        // let (chunk_id, fragment_id, fragment_cid) = res.unwrap();
         let (chunk_id, fragment_id, fragment_cid) = res.unwrap_or_else(|x| x);
         let buf = match read_local_content(fragment_cid.clone()) {
             Ok(buf) => buf,
@@ -359,13 +360,13 @@ fn read_local_content(fragment_cid: CID) -> Result<Vec<u8>, P2PNetworkError> {
     let mut file = match std::fs::File::open(fragment_cid.0.clone()) {
         Ok(file) => file,
         Err(e) => {
-            error!("open file {} error {:?}", e, fragment_cid.0.clone());
+            debug!("open file {} error {:?}", e, fragment_cid.0.clone());
             return Err(e.into());
         },
     };
     let mut buf = Vec::new();
     if let Err(e) = file.read_to_end(&mut buf) {
-        error!("read file {} error {:?}", fragment_cid.0.clone(), e);
+        debug!("read file {} error {:?}", fragment_cid.0.clone(), e);
         return Err(e.into());
     }
     if super::cid(&buf).0 != fragment_cid.0.clone() {
