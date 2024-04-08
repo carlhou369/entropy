@@ -254,11 +254,11 @@ impl Network {
                 event = self.swarm.select_next_some() => self.handle_event(event).await,
                 action = self.action_receiver.next() => match action {
                     Some(c) => self.handle_action(c).await,
-                    None=> {},
+                    None=> return ,
                 },
-                _ = inter.tick() => {
-                    self.list_peers();
-                }
+                // _ = inter.tick() => {
+                //     self.list_peers();
+                // }
             }
         }
     }
@@ -411,12 +411,13 @@ impl Network {
                         response.0.command.clone(),
                         response.0.id.clone()
                     );
-                    let _ = self
+                    let sender = self
                         .pending_request
                         .remove(&request_id)
-                        .expect("Request to still be pending.")
-                        .send(Ok(response))
-                        .unwrap();
+                        .expect("Request to still be pending.");
+                    if !sender.is_canceled() {
+                        sender.send(Ok(response)).unwrap();
+                    }
                 },
             },
             SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(

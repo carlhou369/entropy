@@ -2,7 +2,7 @@ use beta::keystore::KeyStore;
 use beta::p2p::behaviour::Network;
 use beta::p2p::client::Client;
 
-use beta::peer;
+use beta::peer::{self, PeerOpt};
 use clap::Parser;
 use env_logger::{Builder, Env};
 use futures::channel::mpsc;
@@ -39,6 +39,12 @@ struct Cli {
     #[arg(short, long, value_name = "KEY")]
     key: Option<PathBuf>,
 
+    #[arg(short, long, value_name = "INBOUND_STREAM_MAX")]
+    inbound_stream_max: Option<usize>,
+
+    #[arg(short, long, value_name = "OUTBOUND_STREAM_MAX")]
+    outbound_stream_max: Option<usize>,
+
     /// Turn debugging information on
     #[arg(short, long, value_name = "LOGLEVL")]
     log_level: Option<String>,
@@ -58,8 +64,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     keystore.save_to(path).unwrap();
 
     // Demo p2p
-    let (action_sender, action_receiver) = mpsc::channel(10000);
-    let (event_sender, event_receiver) = mpsc::channel(10000);
+    let (action_sender, action_receiver) = mpsc::channel(100);
+    let (event_sender, event_receiver) = mpsc::channel(100);
 
     // New p2p Network
     let network =
@@ -108,7 +114,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             peer.start(
                 "0.0.0.0".to_string(),
                 cli.sport.unwrap(),
-                None,
+                PeerOpt {
+                    codec_opt: None,
+                    max_inbound_stream: cli.inbound_stream_max,
+                    max_oubound_stream: cli.outbound_stream_max,
+                },
                 p2p_client,
             )
             .await;

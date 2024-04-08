@@ -31,14 +31,18 @@ use super::{
     utils::bootstrap_peer,
 };
 use rand::{seq::SliceRandom, thread_rng};
+use tokio::sync::Semaphore;
 
 const PUSH_CHUNK_CMD: &str = "chunk_push";
 const GET_CHUNK_CMD: &str = "chunk_get";
 const PUSH_CHUNK_ACK_CMD: &str = "chunk_push_ack";
 const GET_CHUNK_ACK_CMD: &str = "chunk_get_ack";
 
-const MAX_PENDING_SEND_PER_PEER: usize = 10;
+const MAX_PENDING_SEND_PER_PEER: usize = 3;
 const MAX_PENDING_GET_PER_PEER: usize = 1;
+
+const CHUNK_SEND_TIMEOUT_DURATION: tokio::time::Duration =
+    tokio::time::Duration::from_millis(50);
 
 pub enum PeerCommand {
     PushChunkAck,
@@ -96,8 +100,8 @@ pub struct Client {
     pub event_receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
     pub connected_peers: Arc<Mutex<HashSet<PeerId>>>,
     pub pending_chunks: Arc<Mutex<HashMap<CID, ChunkState>>>,
-    pending_sends: Arc<Mutex<HashMap<PeerId, mpsc::Sender<SendChunkTask>>>>,
-    pending_gets: Arc<Mutex<HashMap<PeerId, mpsc::Sender<GetChunkTask>>>>,
+    pending_sends: Arc<Mutex<HashMap<PeerId, Arc<Semaphore>>>>,
+    pending_gets: Arc<Mutex<HashMap<PeerId, Arc<Semaphore>>>>,
     control: Control,
 }
 
@@ -182,61 +186,39 @@ impl Client {
         chunk_id: CID,
     ) -> Result<(), P2PNetworkError> {
         let (done_sender, done_recv) = oneshot::channel();
-        {
-            let mut pending_gets = self.pending_gets.lock().await;
-            match pending_gets.entry(peer_id.clone()) {
-                Entry::Occupied(o) => {
-                    let sender = o.into_mut();
-                    sender
-                        .send(GetChunkTask {
-                            chunk_id,
-                            peer_id,
-                            done_sender,
-                        })
-                        .await
-                        .unwrap();
-                },
-                Entry::Vacant(v) => {
-                    let (mut sender, mut recv) =
-                        mpsc::channel::<GetChunkTask>(MAX_PENDING_GET_PER_PEER);
-                    let action_sender = self.action_sender.clone();
-                    let local_peer_id = self.local_peer_id.clone();
-                    tokio::spawn(async move {
-                        while let Some(task) = recv.next().await {
-                            let action_sender = action_sender.clone();
-                            debug!(
-                                "handle get chunk {} from {}",
-                                task.chunk_id.0.clone(),
-                                task.peer_id.clone()
-                            );
-                            handle_get_chunk(
-                                local_peer_id,
-                                action_sender,
-                                task.peer_id,
-                                task.chunk_id.clone(),
-                                task.done_sender,
-                            )
-                            .await;
-                            debug!(
-                                "done handle get chunk {} from {}",
-                                task.chunk_id.0.clone(),
-                                task.peer_id.clone()
-                            );
-                        }
-                    });
-                    sender
-                        .send(GetChunkTask {
-                            chunk_id,
-                            peer_id,
-                            done_sender,
-                        })
-                        .await
-                        .unwrap();
-                    v.insert(sender);
-                },
-            }
-            drop(pending_gets);
-        }
+        let action_sender = self.action_sender.clone();
+        let local_peer_id = self.local_peer_id.clone();
+
+        let mut pending_gets = self.pending_gets.lock().await;
+        let sema = match pending_gets.entry(peer_id.clone()) {
+            Entry::Occupied(o) => {
+                let sema = o.into_mut().clone();
+                sema
+            },
+            Entry::Vacant(v) => {
+                let sema = Arc::new(Semaphore::new(MAX_PENDING_GET_PER_PEER));
+                let sema_clone = sema.clone();
+                v.insert(sema);
+                sema_clone
+            },
+        };
+        drop(pending_gets);
+
+        let _ = tokio::spawn(async move {
+            let permit = sema.acquire().await.unwrap();
+            debug!("start handle get chunk to {}", peer_id);
+            handle_get_chunk(
+                local_peer_id,
+                action_sender,
+                peer_id,
+                chunk_id,
+                done_sender,
+            )
+            .await;
+            drop(permit);
+            debug!("done handle get chunk to {}", peer_id);
+        })
+        .await;
         done_recv.await.unwrap()
     }
 
@@ -247,64 +229,39 @@ impl Client {
         chunk: Vec<u8>,
     ) -> Result<(), P2PNetworkError> {
         let (done_sender, done_recv) = oneshot::channel();
-        {
-            let mut pending_sends = self.pending_sends.lock().await;
-            match pending_sends.entry(peer_id.clone()) {
-                Entry::Occupied(o) => {
-                    let sender = o.into_mut();
-                    sender
-                        .send(SendChunkTask {
-                            chunk,
-                            peer_id,
-                            done_sender,
-                        })
-                        .await
-                        .unwrap();
-                },
-                Entry::Vacant(v) => {
-                    let (mut sender, mut recv) = mpsc::channel::<SendChunkTask>(
-                        MAX_PENDING_SEND_PER_PEER,
-                    );
-                    let control = self.control.clone();
-                    let action_sender = self.action_sender.clone();
-                    tokio::spawn(async move {
-                        while let Some(task) = recv.next().await {
-                            let control = control.clone();
-                            let action_sender = action_sender.clone();
-                            let cid = cid(&task.chunk);
-                            debug!(
-                                "handle sending {} to {}",
-                                cid.0.clone(),
-                                peer_id.to_string()
-                            );
-                            handle_send_chunk(
-                                control,
-                                action_sender,
-                                task.peer_id,
-                                task.chunk,
-                                task.done_sender,
-                            )
-                            .await;
-                            debug!(
-                                "done handle sending {} to {}",
-                                cid.0.clone(),
-                                peer_id.to_string()
-                            );
-                        }
-                    });
-                    sender
-                        .send(SendChunkTask {
-                            chunk,
-                            peer_id,
-                            done_sender,
-                        })
-                        .await
-                        .unwrap();
-                    v.insert(sender);
-                },
-            }
-            drop(pending_sends);
-        }
+        let control = self.control.clone();
+        let action_sender = self.action_sender.clone();
+
+        let mut pending_sends = self.pending_sends.lock().await;
+        let sema = match pending_sends.entry(peer_id.clone()) {
+            Entry::Occupied(o) => {
+                let sema = o.into_mut().clone();
+                sema
+            },
+            Entry::Vacant(v) => {
+                let sema = Arc::new(Semaphore::new(MAX_PENDING_SEND_PER_PEER));
+                let sema_clone = sema.clone();
+                v.insert(sema);
+                sema_clone
+            },
+        };
+        drop(pending_sends);
+
+        let _ = tokio::spawn(async move {
+            let permit = sema.acquire().await.unwrap();
+            debug!("start handle send chunk to {}", peer_id);
+            handle_send_chunk(
+                control,
+                action_sender,
+                peer_id,
+                chunk,
+                done_sender,
+            )
+            .await;
+            drop(permit);
+            debug!("done handle send chunk to {}", peer_id);
+        })
+        .await;
         done_recv.await.unwrap()
     }
 
@@ -584,7 +541,7 @@ async fn handle_get_chunk(
     let mut action_sender_dup = action_sender.clone();
     let (sender, receiver) = oneshot::channel();
     let data = match serde_json::to_vec(&GetChunkReq {
-        chunk_id,
+        chunk_id: chunk_id.clone(),
         peer_id: local_peer_id.to_bytes(),
     }) {
         Ok(data) => data,
@@ -606,9 +563,23 @@ async fn handle_get_chunk(
         })
         .await
         .unwrap();
-    let _ = match receiver.await.unwrap() {
-        Ok(_) => done_sender.send(Ok(())),
-        Err(e) => done_sender.send(Err(e)),
+    match tokio::time::timeout(CHUNK_SEND_TIMEOUT_DURATION, receiver).await {
+        Ok(received) => {
+            debug!(
+                "get chunk {} responsed from {}",
+                chunk_id.0.clone(),
+                peer_id
+            );
+            let _ = match received.unwrap() {
+                Ok(_) => done_sender.send(Ok(())),
+                Err(e) => done_sender.send(Err(e)),
+            };
+        },
+        Err(_) => {
+            done_sender
+                .send(Err(P2PNetworkError::ChunkTimeout))
+                .unwrap();
+        },
     };
 }
 
@@ -643,7 +614,6 @@ async fn handle_send_chunk(
         .await
         .unwrap();
 
-    
     let mut stream = match control
         .open_stream(peer_id.to_owned(), Network::stream_protocol())
         .await
@@ -663,9 +633,19 @@ async fn handle_send_chunk(
     };
     stream.close().await.unwrap();
     debug!("handle send chunk close stream to {}", peer_id);
-    let _ = match receiver.await.unwrap() {
-        Ok(_) => done_sender.send(Ok(())),
-        Err(e) => done_sender.send(Err(e)),
+    match tokio::time::timeout(CHUNK_SEND_TIMEOUT_DURATION, receiver).await {
+        Ok(received) => {
+            debug!("send chunk {} responsed from {}", cid.0.clone(), peer_id);
+            let _ = match received.unwrap() {
+                Ok(_) => done_sender.send(Ok(())),
+                Err(e) => done_sender.send(Err(e)),
+            };
+        },
+        Err(_) => {
+            done_sender
+                .send(Err(P2PNetworkError::ChunkTimeout))
+                .unwrap();
+        },
     };
 }
 

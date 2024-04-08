@@ -30,6 +30,8 @@ pub enum P2PNetworkError {
     OpenStreamError(String),
     #[error("serde json error")]
     SerializeError(#[from] serde_json::Error),
+    #[error("chunk transfer timeout")]
+    ChunkTimeout,
     #[error("other error")]
     Other(String),
 }

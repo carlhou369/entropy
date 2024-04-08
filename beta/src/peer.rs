@@ -1,5 +1,6 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
+    fs::OpenOptions,
     io::{self, Read, Write},
     sync::Arc,
     time::Duration,
@@ -34,7 +35,7 @@ use {
 
 const MAX_OUTBOUND_STREAM: usize = 30;
 
-const MAX_INBOUND_STREAM: usize = 3;
+const MAX_INBOUND_STREAM: usize = 10;
 
 #[derive(Debug, Clone)]
 struct ContentMeta {
@@ -55,11 +56,8 @@ struct PeerState {
 }
 
 impl PeerState {
-    pub fn new(
-        codec_option: Option<WirehairCodecOptions>,
-        p2p_client: Client,
-    ) -> Self {
-        let codec = match codec_option {
+    pub fn new(peer_opt: PeerOpt, p2p_client: Client) -> Self {
+        let codec = match peer_opt.codec_opt {
             Some(option) => WirehairCodec::new_with_options(option),
             None => WirehairCodec::new(),
         };
@@ -67,8 +65,12 @@ impl PeerState {
             content_log: Mutex::new(HashMap::new()),
             codec,
             p2p_client,
-            outbound_stream_sema: Arc::new(Semaphore::new(MAX_OUTBOUND_STREAM)),
-            inbound_stream_sema: Arc::new(Semaphore::new(MAX_INBOUND_STREAM)),
+            outbound_stream_sema: Arc::new(Semaphore::new(
+                peer_opt.max_oubound_stream.unwrap_or(MAX_OUTBOUND_STREAM),
+            )),
+            inbound_stream_sema: Arc::new(Semaphore::new(
+                peer_opt.max_inbound_stream.unwrap_or(MAX_INBOUND_STREAM),
+            )),
         }
     }
 }
@@ -323,16 +325,33 @@ struct Fragment {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PeerOpt {
+    pub codec_opt: Option<WirehairCodecOptions>,
+    pub max_inbound_stream: Option<usize>,
+    pub max_oubound_stream: Option<usize>,
+}
+
+impl Default for PeerOpt {
+    fn default() -> Self {
+        Self {
+            codec_opt: Some(WirehairCodecOptions::default()),
+            max_inbound_stream: Some(MAX_INBOUND_STREAM),
+            max_oubound_stream: Some(MAX_OUTBOUND_STREAM),
+        }
+    }
+}
+
 impl FullNodeService {
     pub async fn start(
         &mut self,
         host: String,
         port: u16,
-        codec_option: Option<WirehairCodecOptions>,
+        peer_opt: PeerOpt,
         client: Client,
     ) {
         let addr = (host, port);
-        let peer_state = PeerState::new(codec_option, client);
+        let peer_state = PeerState::new(peer_opt, client);
 
         let data = Data::new(peer_state);
         let _ = HttpServer::new(move || {
