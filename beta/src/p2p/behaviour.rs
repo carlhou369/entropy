@@ -3,7 +3,7 @@ use crate::CID;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use futures::StreamExt;
-use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
+
 use tempfile::NamedTempFile;
 
 use libp2p::core::ConnectedPoint;
@@ -15,16 +15,17 @@ use libp2p::{
     core::Multiaddr,
     identify, identity, kad,
     multiaddr::Protocol,
-    noise, ping,
+    noise,
     request_response::{
         self, OutboundRequestId, ProtocolSupport, ResponseChannel,
     },
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp, yamux, PeerId,
 };
+use tokio::time::interval;
 
 use crate::reqres_proto::{PeerRequestMessage, PeerResponseMessage};
-use libp2p::{Stream, StreamProtocol};
+use libp2p::{ping, Stream, StreamProtocol};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
 
@@ -33,9 +34,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-
-// #[derive(Eq, Hash, PartialEq, Clone, Debug)]
-// pub struct ChunkID(pub Vec<u8>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRequest(pub PeerRequestMessage);
@@ -51,7 +49,7 @@ pub struct Behaviour {
     #[cfg(feature = "gossipsub")]
     gossipsub: gossipsub::Behaviour,
     identify: identify::Behaviour,
-    // ping: ping::Behaviour,
+    ping: ping::Behaviour,
     stream: libp2p_stream::Behaviour,
 }
 
@@ -137,7 +135,6 @@ impl Network {
         let peer_id = id_keys.public().to_peer_id();
         let mut yamux_config = yamux::Config::default();
         yamux_config.set_max_num_streams(1000);
-        // yamux_config.set_max_buffer_size(1024 * 1024 * 100);
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
             .with_tokio()
@@ -181,11 +178,11 @@ impl Network {
                         "/entropy/0.1.0".into(),
                         key.public(),
                     )),
-                    // ping: ping::Behaviour::new(
-                    //     ping::Config::new()
-                    //         .with_interval(Duration::from_secs(5))
-                    //         .with_timeout(Duration::from_secs(10)),
-                    // ),
+                    ping: ping::Behaviour::new(
+                        ping::Config::new()
+                            .with_interval(Duration::from_secs(5))
+                            .with_timeout(Duration::from_secs(10)),
+                    ),
                     stream: libp2p_stream::Behaviour::new(),
                 })
             })
@@ -229,7 +226,7 @@ impl Network {
 
         self.swarm.add_external_address(multiaddr.clone());
 
-        let mut inter = tokio::time::interval(Duration::from_secs(10));
+        let _inter = tokio::time::interval(Duration::from_secs(10));
         let mut control = self.swarm.behaviour().stream.new_control();
         let mut incomming_stream =
             control.accept(Self::stream_protocol()).unwrap();
@@ -249,6 +246,7 @@ impl Network {
             }
         });
 
+        let mut inter = interval(Duration::from_secs(10));
         loop {
             tokio::select! {
                 event = self.swarm.select_next_some() => self.handle_event(event).await,
@@ -256,9 +254,9 @@ impl Network {
                     Some(c) => self.handle_action(c).await,
                     None=> return ,
                 },
-                // _ = inter.tick() => {
-                //     self.list_peers();
-                // }
+                _ = inter.tick() => {
+                    self.list_peers();
+                }
             }
         }
     }
@@ -323,7 +321,6 @@ impl Network {
                         kad::QueryResult::GetClosestPeers(Ok(
                             kad::GetClosestPeersOk { peers, key: _ },
                         )),
-                    // stats,
                     ..
                 },
             )) => {
@@ -619,7 +616,7 @@ impl Network {
         for bucket in self.swarm.behaviour_mut().kademlia.kbuckets() {
             if bucket.num_entries() > 0 {
                 for item in bucket.iter() {
-                    // debug!("Peer ID: {:?}", item.node.key);
+                    debug!("local bucket peers peerid: {:?}", item.node.key);
                 }
             }
         }

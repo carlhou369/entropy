@@ -131,12 +131,13 @@ impl Handler<Put> for Server {
             }
             chunks.insert(chunk_id, fragments);
         }
-        
     }
 }
 
 #[derive(Default)]
 pub struct Peer {}
+
+type ChunkInfoMap = Mutex<HashMap<u64, (u64, u64, Vec<ChunkInfo>)>>;
 
 #[derive(Debug, Default)]
 struct PeerState {
@@ -145,7 +146,7 @@ struct PeerState {
     pub chunk_config: ChunkConfig,
 
     pub fragments: Mutex<HashMap<u32, Vec<u8>>>,
-    pub chunk_infos: Mutex<HashMap<u64, (u64, u64, Vec<ChunkInfo>)>>,
+    pub chunk_infos: ChunkInfoMap,
 }
 
 #[derive(Debug, Clone, Default)]

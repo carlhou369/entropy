@@ -1,10 +1,8 @@
-use core::task;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt::Debug,
     io::Read,
     sync::Arc,
-    time::Duration,
 };
 
 use crate::{
@@ -13,7 +11,7 @@ use crate::{
     reqres_proto::{PeerRequestMessage, PeerResponseMessage},
     CID,
 };
-use actix::dev::OneshotSender;
+
 use futures::{
     channel::{mpsc, oneshot},
     AsyncWriteExt, SinkExt, StreamExt,
@@ -75,20 +73,6 @@ pub enum ChunkState {
         ),
     ), //(cid, response channel, request id)
     Saved(CID),
-}
-
-#[derive(Debug)]
-struct SendChunkTask {
-    chunk: Vec<u8>,
-    peer_id: PeerId,
-    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
-}
-
-#[derive(Debug)]
-struct GetChunkTask {
-    chunk_id: CID,
-    peer_id: PeerId,
-    done_sender: oneshot::Sender<Result<(), P2PNetworkError>>,
 }
 
 /// Client encapsulates the interface for interacting with the Network, handling network events.
@@ -187,10 +171,10 @@ impl Client {
     ) -> Result<(), P2PNetworkError> {
         let (done_sender, done_recv) = oneshot::channel();
         let action_sender = self.action_sender.clone();
-        let local_peer_id = self.local_peer_id.clone();
+        let local_peer_id = self.local_peer_id;
 
         let mut pending_gets = self.pending_gets.lock().await;
-        let sema = match pending_gets.entry(peer_id.clone()) {
+        let sema = match pending_gets.entry(peer_id) {
             Entry::Occupied(o) => {
                 let sema = o.into_mut().clone();
                 sema
@@ -233,7 +217,7 @@ impl Client {
         let action_sender = self.action_sender.clone();
 
         let mut pending_sends = self.pending_sends.lock().await;
-        let sema = match pending_sends.entry(peer_id.clone()) {
+        let sema = match pending_sends.entry(peer_id) {
             Entry::Occupied(o) => {
                 let sema = o.into_mut().clone();
                 sema
@@ -267,7 +251,7 @@ impl Client {
 
     pub async fn random_closest_peer(
         &self,
-        key: Vec<u8>,
+        _key: Vec<u8>,
         cnt: usize,
     ) -> Result<Vec<PeerId>, P2PNetworkError> {
         let connected_peers = self.connected_peers.lock().await;
@@ -483,31 +467,6 @@ impl Client {
                     };
                     pendind_chunks
                         .insert(chunk_id.clone(), ChunkState::Saved(chunk_id));
-
-                    // if let Some(ChunkState::WaitToReceive((
-                    //     _chunk_id,
-                    //     channel,
-                    //     req_id,
-                    //     ..,
-                    // ))) = pendind_chunks.remove(&chunk_id)
-                    // {
-                    //     action_sender_dup
-                    //         .send(Action::SendResponse {
-                    //             response: PeerResponse(PeerResponseMessage {
-                    //                 id: req_id,
-                    //                 command: PUSH_CHUNK_ACK_CMD.to_string(),
-                    //                 data: b"ack".to_vec(),
-                    //             }),
-                    //             channel,
-                    //         })
-                    //         .await
-                    //         .unwrap();
-                    // } else {
-                    //     pendind_chunks.insert(
-                    //         chunk_id.clone(),
-                    //         ChunkState::Saved(chunk_id),
-                    //     );
-                    // }
                 },
                 Event::IncomeConnection {
                     peer_id,
@@ -521,8 +480,6 @@ impl Client {
                     peer_id,
                     connection_id,
                 } => {
-                    // let mut peers = peers_clone.lock().await;
-                    // peers.remove(&peer_id);
                     info!("connection closed peerID {peer_id} connectionID {connection_id}");
                 },
                 _ => {},

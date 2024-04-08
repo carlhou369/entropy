@@ -1,12 +1,11 @@
 use std::{
     collections::{hash_map::Entry, HashMap},
-    fs::OpenOptions,
-    io::{self, Read, Write},
+    io::{Read},
     sync::Arc,
     time::Duration,
 };
 
-use actix_web::web::{self, Query};
+use actix_web::web::{self};
 use libp2p::PeerId;
 use log::{debug, error, info};
 use tokio::{sync::Semaphore, task::JoinSet};
@@ -18,7 +17,7 @@ use crate::{
     CID,
 };
 
-use std::fs;
+
 use {
     actix_multipart::form::{bytes::Bytes, MultipartForm, MultipartFormConfig},
     actix_web::{
@@ -109,7 +108,6 @@ async fn put(
         for (fragment_id, fragment) in chunk.into_iter() {
             let fragment_cid = cid(&fragment);
             // save local copy
-            // todo: save local
             // let mut file = fs::File::create(fragment_cid.clone().0).unwrap();
             // file.write_all(&fragment).unwrap();
             // file.flush().unwrap();
@@ -188,7 +186,7 @@ async fn get(
             let client = data.p2p_client.clone();
             let sema = data.inbound_stream_sema.clone();
             set.spawn(async move {
-                if let Ok(_) = read_local_content(fragment_cid.clone()) {
+                if read_local_content(fragment_cid.clone()).is_ok() {
                     return Ok((chunk_id, fragment_id, fragment_cid.clone()));
                 };
                 let permit = sema.acquire().await.unwrap();
@@ -262,54 +260,6 @@ async fn get(
                 v.insert(chunk_links);
             },
         }
-
-        // match res {
-        //     Ok((chunk_id, fragment_id, fragment_cid)) => {
-        //         let mut file = match std::fs::File::open(fragment_cid.0.clone())
-        //         {
-        //             Ok(file) => file,
-        //             Err(e) => {
-        //                 error!("open file {:?}", e);
-        //                 continue;
-        //             },
-        //         };
-        //         let mut buf = Vec::new();
-        //         if let Err(e) = file.read_to_end(&mut buf) {
-        //             error!("read file {:?}", e);
-        //             continue;
-        //         }
-        //         if super::cid(&buf).0 != fragment_cid.0.clone() {
-        //             error!(
-        //                 "fragment content inconsistent {}",
-        //                 fragment_cid.0.clone()
-        //             );
-        //             continue;
-        //         }
-        //         match links.entry(chunk_id) {
-        //             Entry::Occupied(o) => {
-        //                 let o = o.into_mut();
-        //                 o.insert(fragment_id, buf);
-        //             },
-        //             Entry::Vacant(v) => {
-        //                 let mut chunk_links: HashMap<u32, Vec<u8>> =
-        //                     HashMap::new();
-        //                 chunk_links.insert(fragment_id, buf);
-        //                 v.insert(chunk_links);
-        //             },
-        //         }
-        //     },
-        //     Err((chunk_id, fragment_id, _fragment_cid)) => {
-        //         // return HttpResponse::InternalServerError().body(format!(
-        //         //     "content {} chunk {} fragment {} not found",
-        //         //     cid.0, chunk_id, fragment_id
-        //         // ));
-        //         error!(
-        //             "content {} chunk {} fragment {} not found",
-        //             cid.0, chunk_id, fragment_id
-        //         );
-        //         continue;
-        //     },
-        // }
     }
 
     let object = data.codec.decode(links, object_size);
