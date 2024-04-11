@@ -110,6 +110,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 panic!("peer addr format error");
             }
+            let p = future::pending();
+            let () = p.await;
         },
         None => {
             // Start full node demo
@@ -127,7 +129,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await;
         },
     }
-    let p = future::pending();
-    let () = p.await;
     Ok(())
 }

@@ -207,7 +207,7 @@ async fn get(
                             ));
                         },
                         Err(e) => {
-                            error!(
+                            debug!(
                                 "get chunk {} from peer {} error {}",
                                 fragment_cid.0.clone(),
                                 light_peer.clone(),
